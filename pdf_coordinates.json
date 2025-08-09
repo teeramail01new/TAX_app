@@ -15,88 +15,88 @@
     "size": 10
   },
   "withholdee_name": {
-    "x": 120,
-    "y": 280,
+    "x": 70,
+    "y": 670,
     "size": 10
   },
   "withholdee_address": {
-    "x": 120,
-    "y": 305,
+    "x": 70,
+    "y": 635,
     "size": 8
   },
   "withholdee_tax_id": {
-    "x": 120,
-    "y": 330,
+    "x": 380,
+    "y": 680,
     "size": 10
   },
   "certificate_book_no": {
-    "x": 400,
-    "y": 120,
+    "x": 340,
+    "y": 520,
     "size": 10
   },
   "certificate_no": {
-    "x": 500,
-    "y": 120,
+    "x": 200,
+    "y": 160,
     "size": 10
   },
   "form_type": {
-    "x": 400,
-    "y": 140,
+    "x": 385,
+    "y": 585,
     "size": 10
   },
   "income_1_amount": {
-    "x": 280,
-    "y": 400,
+    "x": 420,
+    "y": 535,
     "size": 10
   },
   "income_1_tax": {
-    "x": 380,
-    "y": 400,
+    "x": 510,
+    "y": 535,
     "size": 10
   },
   "income_2_amount": {
-    "x": 280,
-    "y": 425,
+    "x": 420,
+    "y": 520,
     "size": 10
   },
   "income_2_tax": {
-    "x": 380,
-    "y": 425,
+    "x": 510,
+    "y": 520,
     "size": 10
   },
   "total_income": {
-    "x": 280,
-    "y": 480,
+    "x": 420,
+    "y": 180,
     "size": 12
   },
   "total_tax": {
-    "x": 380,
-    "y": 480,
+    "x": 480,
+    "y": 180,
     "size": 12
   },
   "total_tax_text": {
-    "x": 120,
-    "y": 510,
+    "x": 200,
+    "y": 160,
     "size": 10
   },
   "provident_fund": {
-    "x": 280,
-    "y": 560,
+    "x": 240,
+    "y": 145,
     "size": 10
   },
   "social_security_fund": {
     "x": 380,
-    "y": 560,
+    "y": 140,
     "size": 10
   },
   "retirement_mutual_fund": {
-    "x": 480,
-    "y": 560,
+    "x": 500,
+    "y": 140,
     "size": 10
   },
   "issue_date": {
-    "x": 400,
-    "y": 620,
+    "x": 340,
+    "y": 535,
     "size": 10
   },
   "signatory_name": {

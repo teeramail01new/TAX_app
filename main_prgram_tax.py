@@ -1786,7 +1786,7 @@ def main(page: ft.Page):
 
         refresh_grid()
 
-        return ft.Container(
+        crystal_tab = ft.Container(
             content=ft.Column([
                 ft.Text("นำเข้าจาก Excel", size=22, weight=ft.FontWeight.BOLD),
                 ft.Text("โครงสร้างไฟล์เหมือนกับไฟล์ที่ส่งออก (Transfer Records)", size=12),
@@ -5074,6 +5074,110 @@ def main(page: ft.Page):
         
         # Coordinate adjustment controls
         coordinate_fields = {}
+
+        # --- Database helpers for coordinate persistence ---
+        DB_CONN_STR = "postgresql://neondb_owner:npg_BidDY7RA4zWX@ep-long-haze-a17mcg70-pooler.ap-southeast-1.aws.neon.tech/program_tax?sslmode=require&channel_binding=require"
+
+        def get_db_connection_for_coords():
+            try:
+                return psycopg2.connect(DB_CONN_STR)
+            except Exception as db_ex:
+                print(f"Coordinate DB connection error: {db_ex}")
+                return None
+
+        def ensure_coordinate_table():
+            conn = get_db_connection_for_coords()
+            if not conn:
+                return False
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS coordinate (
+                        field_id TEXT PRIMARY KEY,
+                        x INTEGER NOT NULL,
+                        y INTEGER NOT NULL,
+                        size INTEGER NOT NULL,
+                        updated_at TIMESTAMPTZ DEFAULT now()
+                    );
+                    """
+                )
+                conn.commit()
+                return True
+            except Exception as ex:
+                print(f"Ensure coordinate table error: {ex}")
+                return False
+            finally:
+                try:
+                    cur.close()
+                    conn.close()
+                except:
+                    pass
+
+        def save_coordinates_to_db():
+            conn = get_db_connection_for_coords()
+            if not conn:
+                raise RuntimeError("ไม่สามารถเชื่อมต่อฐานข้อมูลเพื่อบันทึกพิกัดได้")
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS coordinate (
+                        field_id TEXT PRIMARY KEY,
+                        x INTEGER NOT NULL,
+                        y INTEGER NOT NULL,
+                        size INTEGER NOT NULL,
+                        updated_at TIMESTAMPTZ DEFAULT now()
+                    );
+                    """
+                )
+                upsert_sql = (
+                    "INSERT INTO coordinate(field_id, x, y, size, updated_at) VALUES (%s,%s,%s,%s, now()) "
+                    "ON CONFLICT(field_id) DO UPDATE SET x=EXCLUDED.x, y=EXCLUDED.y, size=EXCLUDED.size, updated_at=now()"
+                )
+                for field_id, controls in coordinate_fields.items():
+                    x_val = int(controls['x'].value)
+                    y_val = int(controls['y'].value)
+                    size_val = int(controls['size'].value)
+                    cur.execute(upsert_sql, (field_id, x_val, y_val, size_val))
+                conn.commit()
+            finally:
+                try:
+                    cur.close()
+                    conn.close()
+                except:
+                    pass
+
+        def load_coordinates_from_db_initial():
+            conn = get_db_connection_for_coords()
+            if not conn:
+                return False
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT field_id, x, y, size FROM coordinate")
+                rows = cur.fetchall()
+                changed_any = False
+                for field_id, x_val, y_val, size_val in rows:
+                    if field_id in coordinate_fields:
+                        coordinate_fields[field_id]['x'].value = str(x_val)
+                        coordinate_fields[field_id]['y'].value = str(y_val)
+                        coordinate_fields[field_id]['size'].value = str(size_val)
+                        changed_any = True
+                if changed_any:
+                    try:
+                        page.update()
+                    except:
+                        pass
+                return changed_any
+            except Exception as ex:
+                print(f"Load coordinates error: {ex}")
+                return False
+            finally:
+                try:
+                    cur.close()
+                    conn.close()
+                except:
+                    pass
         
         def create_coordinate_controls():
             """Create coordinate adjustment controls for each field"""
@@ -5155,8 +5259,76 @@ def main(page: ft.Page):
                         initially_expanded=False
                     )
                 )
+            # Ensure DB table exists and try to load last saved coordinates into controls
+            try:
+                ensure_coordinate_table()
+                loaded = load_coordinates_from_db_initial()
+                if loaded:
+                    status_text.value = "✅ โหลดพิกัดจากฐานข้อมูลแล้ว"
+                    status_text.color = ft.colors.GREEN_700
+                else:
+                    status_text.value = "ℹ️ ใช้ค่าพิกัดเริ่มต้น"
+                    status_text.color = ft.colors.ORANGE_700
+                try:
+                    page.update()
+                except:
+                    pass
+            except Exception as ex:
+                print(f"Initial coordinate DB load warning: {ex}")
             
             return coordinate_controls
+
+        # Auto-load coordinates once after controls are created (DB -> JSON -> defaults)
+        def initialize_coordinate_settings_once():
+            try:
+                # 1) Try DB first
+                loaded_db = False
+                try:
+                    if ensure_coordinate_table():
+                        loaded_db = load_coordinates_from_db_initial()
+                except Exception as db_init_ex:
+                    print(f"Coordinate DB init/load error: {db_init_ex}")
+
+                if loaded_db:
+                    status_text.value = (status_text.value + " | 📍 โหลดพิกัดจาก DB แล้ว") if status_text.value else "📍 โหลดพิกัดจาก DB แล้ว"
+                    status_text.color = ft.colors.GREEN_700
+                    try:
+                        page.update()
+                    except:
+                        pass
+                    return
+
+                # 2) Fallback to JSON file
+                try:
+                    import json, os
+                    config_path = os.path.join(os.getcwd(), "pdf_coordinates.json")
+                    if os.path.exists(config_path):
+                        with open(config_path, 'r', encoding='utf-8') as f:
+                            config_data = json.load(f)
+                        for field_id, coords in config_data.items():
+                            if field_id in coordinate_fields:
+                                coordinate_fields[field_id]['x'].value = str(coords.get('x', coordinate_fields[field_id]['x'].value))
+                                coordinate_fields[field_id]['y'].value = str(coords.get('y', coordinate_fields[field_id]['y'].value))
+                                coordinate_fields[field_id]['size'].value = str(coords.get('size', coordinate_fields[field_id]['size'].value))
+                        status_text.value = (status_text.value + " | 📄 โหลดพิกัดจากไฟล์แล้ว") if status_text.value else "📄 โหลดพิกัดจากไฟล์แล้ว"
+                        status_text.color = ft.colors.GREEN_700
+                        try:
+                            page.update()
+                        except:
+                            pass
+                        return
+                except Exception as json_ex:
+                    print(f"Coordinate JSON load error: {json_ex}")
+
+                # 3) Otherwise keep defaults already set in controls
+                status_text.value = (status_text.value + " | ℹ️ ใช้พิกัดเริ่มต้น") if status_text.value else "ℹ️ ใช้พิกัดเริ่มต้น"
+                status_text.color = ft.colors.ORANGE_700
+                try:
+                    page.update()
+                except:
+                    pass
+            except Exception as init_ex:
+                print(f"Coordinate init error: {init_ex}")
         
         # Add small PDF viewer for coordinate testing
         coordinate_test_viewer = ft.Container(
@@ -5621,8 +5793,15 @@ def main(page: ft.Page):
                 with open(config_path, 'w', encoding='utf-8') as f:
                     json.dump(config_data, f, ensure_ascii=False, indent=2)
                 
-                status_text.value = f"✅ บันทึกการตั้งค่าพิกัดแล้ว: {config_path}"
-                status_text.color = ft.colors.GREEN_700
+                # Also persist to Neon DB (coordinate table)
+                try:
+                    ensure_coordinate_table()
+                    save_coordinates_to_db()
+                    status_text.value = f"✅ บันทึกการตั้งค่าพิกัดแล้ว (ไฟล์ + DB): {config_path}"
+                    status_text.color = ft.colors.GREEN_700
+                except Exception as ex:
+                    status_text.value = f"⚠️ บันทึกไฟล์สำเร็จ แต่บันทึก DB ล้มเหลว: {str(ex)}"
+                    status_text.color = ft.colors.ORANGE_700
                 page.update()
                 
             except Exception as e:
@@ -5637,10 +5816,25 @@ def main(page: ft.Page):
                 config_path = os.path.join(os.getcwd(), "pdf_coordinates.json")
                 
                 if not os.path.exists(config_path):
-                    status_text.value = "❌ ไม่พบไฟล์การตั้งค่า pdf_coordinates.json"
-                    status_text.color = ft.colors.ORANGE_700
-                    page.update()
-                    return
+                    # If no file, try DB instead
+                    try:
+                        ensure_coordinate_table()
+                        loaded = load_coordinates_from_db_initial()
+                        if loaded:
+                            status_text.value = "✅ โหลดการตั้งค่าพิกัดจากฐานข้อมูลแล้ว"
+                            status_text.color = ft.colors.GREEN_700
+                            page.update()
+                            return
+                        else:
+                            status_text.value = "❌ ไม่พบไฟล์/ข้อมูลการตั้งค่า"
+                            status_text.color = ft.colors.ORANGE_700
+                            page.update()
+                            return
+                    except Exception as ex:
+                        status_text.value = f"❌ โหลดจาก DB ไม่สำเร็จ: {str(ex)}"
+                        status_text.color = ft.colors.RED_700
+                        page.update()
+                        return
                 
                 with open(config_path, 'r', encoding='utf-8') as f:
                     config_data = json.load(f)
@@ -5682,11 +5876,275 @@ def main(page: ft.Page):
                 except:
                     pass  # Container might not be added to page yet
         
-        # Initialize PDF preview
-        update_pdf_preview()
+        # Initialize PDF preview (don't call update immediately to avoid AssertionError)
+        # update_pdf_preview()
         
         # Ensure main container has the initial content
         main_pdf_container.content = pdf_image_control
+        
+        # --- Thai font resolver for PDF text drawing ---
+        def resolve_thai_font(doc) -> str | None:
+            """Check for Thai font support - return None since font insertion methods are not available"""
+            try:
+                print("🔍 Checking Thai font support...")
+                
+                # Check if we have any font insertion methods
+                has_insert_font = hasattr(doc, 'insert_font')
+                has_insertFont = hasattr(doc, 'insertFont')
+                
+                print(f"📋 PyMuPDF methods: insert_font={has_insert_font}, insertFont={has_insertFont}")
+                
+                if not (has_insert_font or has_insertFont):
+                    print("ℹ️ PyMuPDF version doesn't support font insertion - will use UTF-8 encoding")
+                    return None
+                
+                # If methods are available, try to use them (for future compatibility)
+                candidates = [
+                    r"C:\Windows\Fonts\Tahoma.ttf",
+                    r"C:\Windows\Fonts\tahoma.ttf", 
+                    r"C:\Windows\Fonts\LeelawUI.ttf",
+                ]
+                
+                for font_path in candidates:
+                    if os.path.exists(font_path):
+                        try:
+                            if has_insert_font:
+                                font_name = doc.insert_font(fontfile=font_path)
+                            else:
+                                font_name = doc.insertFont(fontfile=font_path)
+                            print(f"✅ Using Thai font: {os.path.basename(font_path)} -> {font_name}")
+                            return font_name
+                        except Exception as fe:
+                            print(f"❌ Failed to insert font {font_path}: {fe}")
+                            continue
+                
+                print("⚠️ Font insertion available but failed - will use UTF-8 encoding")
+                return None
+                
+            except Exception as e:
+                print(f"❌ Font check error: {e}")
+                return None
+        
+        def create_thai_pdf_with_reportlab(original_pdf_path, output_path, text_overlays):
+            """Create Thai-enabled PDF using ReportLab overlaying on original PDF"""
+            try:
+                from reportlab.pdfgen import canvas
+                from reportlab.lib.pagesizes import A4
+                from reportlab.pdfbase import pdfmetrics
+                from reportlab.pdfbase.ttfonts import TTFont
+                import tempfile
+                
+                print("🎯 Using ReportLab for Thai text rendering...")
+                
+                # Find and register Thai font
+                thai_font_name = None
+                thai_fonts = [
+                    ("Tahoma", r"C:\Windows\Fonts\tahoma.ttf"),
+                    ("LeelawUI", r"C:\Windows\Fonts\LeelawUI.ttf"),
+                    ("THSarabun", r"C:\Windows\Fonts\THSarabunNew.ttf"),
+                ]
+                
+                for font_name, font_path in thai_fonts:
+                    if os.path.exists(font_path):
+                        try:
+                            pdfmetrics.registerFont(TTFont(font_name, font_path))
+                            thai_font_name = font_name
+                            print(f"✅ Registered Thai font: {font_name}")
+                            break
+                        except Exception as e:
+                            print(f"❌ Failed to register {font_name}: {e}")
+                            continue
+                
+                # Create overlay PDF with Thai text
+                temp_overlay = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
+                temp_overlay.close()
+                
+                c = canvas.Canvas(temp_overlay.name, pagesize=A4)
+                page_width, page_height = A4
+                
+                # Add text overlays
+                for text, x, y, font_size in text_overlays:
+                    if text and str(text).strip():
+                        # Convert coordinates (PDF uses bottom-up Y-axis)
+                        pdf_y = page_height - y
+                        
+                        if thai_font_name:
+                            c.setFont(thai_font_name, font_size)
+                        else:
+                            c.setFont("Helvetica", font_size)
+                        
+                        # Draw text
+                        c.drawString(x, pdf_y, str(text))
+                        print(f"📝 Added to overlay: '{text}' at ({x}, {pdf_y}) with font: {thai_font_name or 'Helvetica'}")
+                
+                c.save()
+                
+                # Merge original PDF with overlay using PyMuPDF
+                import fitz
+                
+                # Open original PDF
+                original_doc = fitz.open(original_pdf_path)
+                original_page = original_doc[0]
+                
+                # Open overlay PDF
+                overlay_doc = fitz.open(temp_overlay.name)
+                overlay_page = overlay_doc[0]
+                
+                # Merge overlay onto original
+                original_page.show_pdf_page(original_page.rect, overlay_doc, 0)
+                
+                # Save result
+                original_doc.save(output_path)
+                original_doc.close()
+                overlay_doc.close()
+                
+                # Clean up temp file
+                os.unlink(temp_overlay.name)
+                
+                print(f"✅ Successfully created Thai PDF: {output_path}")
+                return True
+                
+            except ImportError as e:
+                print(f"❌ ReportLab not available: {e}")
+                return False
+            except Exception as e:
+                print(f"❌ Error creating Thai PDF with ReportLab: {e}")
+                return False
+
+        def insert_thai_text(page, text, x, y, fontsize=12, color=(0,0,0), fontname=None):
+            """Insert Thai text with proper encoding fallback"""
+            try:
+                import fitz  # Fix: import fitz here
+                point = fitz.Point(x, y)
+                
+                # Method 1: Try with specific font if provided
+                if fontname:
+                    try:
+                        page.insert_text(point, text, fontsize=fontsize, color=color, fontname=fontname)
+                        print(f"📝 Inserted text with font {fontname}: '{text[:30]}...'")
+                        return True
+                    except Exception as e:
+                        print(f"❌ Font insertion failed: {e}")
+                
+                # Method 2: Use UTF-8 encoding (works with PyMuPDF for Thai)
+                try:
+                    page.insert_text(point, text, fontsize=fontsize, color=color, encoding=1)
+                    print(f"📝 Inserted text with UTF-8 encoding: '{text[:30]}...'")
+                    return True
+                except Exception as e:
+                    print(f"❌ UTF-8 insertion failed: {e}")
+                
+                # Method 3: Default insertion (fallback)
+                try:
+                    page.insert_text(point, text, fontsize=fontsize, color=color)
+                    print(f"📝 Inserted text with default method: '{text[:30]}...'")
+                    return True
+                except Exception as e:
+                    print(f"❌ Default insertion failed: {e}")
+                    return False
+                
+            except Exception as e:
+                print(f"❌ Text insertion error: {e}")
+                return False
+        
+        def check_database_encoding():
+            """Check database encoding and test Thai text storage"""
+            try:
+                import psycopg2
+                conn_str = "postgresql://neondb_owner:npg_BidDY7RA4zWX@ep-long-haze-a17mcg70-pooler.ap-southeast-1.aws.neon.tech/program_tax?sslmode=require&channel_binding=require"
+                
+                with psycopg2.connect(conn_str) as conn:
+                    with conn.cursor() as cur:
+                        # Check database encoding
+                        cur.execute("SHOW server_encoding;")
+                        db_encoding = cur.fetchone()[0]
+                        print(f"🗄️ Database encoding: {db_encoding}")
+                        
+                        # Check client encoding
+                        cur.execute("SHOW client_encoding;")
+                        client_encoding = cur.fetchone()[0]
+                        print(f"🖥️ Client encoding: {client_encoding}")
+                        
+                        # Test Thai text insertion and retrieval
+                        test_thai = "บริษัท ทดสอบ จำกัด ภาษาไทย 🇹🇭"
+                        cur.execute("SELECT %s as thai_test", (test_thai,))
+                        retrieved = cur.fetchone()[0]
+                        print(f"🧪 Original: {test_thai}")
+                        print(f"🧪 Retrieved: {retrieved}")
+                        print(f"🧪 Match: {test_thai == retrieved}")
+                        
+                        return db_encoding, client_encoding, test_thai == retrieved
+                        
+            except Exception as e:
+                print(f"❌ Database encoding check failed: {e}")
+                return None, None, False
+        
+        def test_thai_text_pdf(e):
+            """Test function to generate Thai text in PDF for debugging"""
+            try:
+                # First check database encoding
+                print("🔍 Checking database encoding...")
+                db_enc, client_enc, thai_match = check_database_encoding()
+                if db_enc:
+                    print(f"📊 Database: {db_enc}, Client: {client_enc}, Thai test: {'✅' if thai_match else '❌'}")
+                
+                if not os.path.exists(selected_pdf_path):
+                    status_text.value = "❌ ไม่พบไฟล์ PDF ต้นฉบับ"
+                    status_text.color = ft.colors.RED_700
+                    page.update()
+                    return
+                
+                import fitz
+                from datetime import datetime
+                
+                # Create test filename
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                test_filename = f"thai_test_{timestamp}.pdf"
+                test_path = os.path.join(os.getcwd(), test_filename)
+                
+                # Open the original PDF
+                doc = fitz.open(selected_pdf_path)
+                page_pdf = doc[0]
+                
+                # Ensure Thai-capable font is available
+                thai_fontname = resolve_thai_font(doc)
+                print(f"🧪 Testing with font: {thai_fontname}")
+                
+                # Test Thai text samples
+                thai_texts = [
+                    ("บริษัท ทดสอบ จำกัด", 100, 150, 16),
+                    ("เลขประจำตัวผู้เสียภาษี: 1234567890123", 100, 200, 12),
+                    ("ที่อยู่: 123 ถนนสุขุมวิท แขวงคลองเตย เขตคลองเตย กรุงเทพมหานคร 10110", 100, 250, 10),
+                    ("วันที่: ๑๕ มกราคม ๒๕๖๗", 100, 300, 14),
+                    ("จำนวนเงิน: ๑๐,๐๐๐.๐๐ บาท", 100, 350, 12),
+                    ("หมายเหตุ: ทดสอบการแสดงผลภาษาไทยในไฟล์ PDF", 100, 400, 10)
+                ]
+                
+                # Insert test text using the new Thai text function
+                for text, x, y, font_size in thai_texts:
+                    insert_thai_text(page_pdf, text, x, y, font_size, (0, 0, 0), thai_fontname)
+                
+                # Add header text
+                header_text = "🧪 การทดสอบฟอนต์ภาษาไทยใน PDF"
+                insert_thai_text(page_pdf, header_text, 100, 100, 18, (1, 0, 0), thai_fontname)
+                
+                # Save the test PDF
+                doc.save(test_path)
+                doc.close()
+                
+                status_text.value = f"✅ ทดสอบภาษาไทยสำเร็จ: {test_filename}"
+                status_text.color = ft.colors.GREEN_700
+                if not thai_fontname:
+                    status_text.value += " (ใช้ฟอนต์เริ่มต้น)"
+                if db_enc:
+                    status_text.value += f" | DB: {db_enc}"
+                page.update()
+                
+            except Exception as ex:
+                status_text.value = f"❌ ข้อผิดพลาดในการทดสอบ: {str(ex)}"
+                status_text.color = ft.colors.RED_700
+                page.update()
+                print(f"🚫 Test error: {ex}")
         
         def fill_and_save_pdf(e):
             """Fill the displayed PDF with form data and save it"""
@@ -5722,6 +6180,9 @@ def main(page: ft.Page):
                 # Open the original PDF
                 doc = fitz.open(selected_pdf_path)
                 page_pdf = doc[0]
+                
+                # Ensure Thai-capable font is available
+                thai_fontname = resolve_thai_font(doc)
                 
                 # Get page dimensions
                 rect = page_pdf.rect
@@ -5785,12 +6246,26 @@ def main(page: ft.Page):
                         actual_y = page_height - y
                         text_overlays.append((field_value, x, actual_y, font_size))
                 
-                # Add text overlays to the PDF
+                # Try ReportLab method first (best for Thai)
+                print(f"📄 Processing {len(text_overlays)} text overlays...")
+                success = create_thai_pdf_with_reportlab(selected_pdf_path, output_path, text_overlays)
+                
+                if success:
+                    # ReportLab succeeded, skip PyMuPDF
+                    doc.close()
+                    status_text.value = f"✅ บันทึกแบบฟอร์มด้วย ReportLab เรียบร้อย: {output_filename}"
+                    status_text.color = ft.colors.GREEN_700
+                    status_text.value += " (รองรับภาษาไทย 🇹🇭)"
+                    page.update()
+                    return
+                
+                # Fallback to PyMuPDF method if ReportLab fails
+                print("🔄 Falling back to PyMuPDF method...")
                 for text, x, y, font_size in text_overlays:
                     if text and str(text).strip():  # Only add non-empty text
-                        # Create text annotation
-                        text_point = fitz.Point(x, y)
-                        page_pdf.insert_text(text_point, str(text), fontsize=font_size, color=(0, 0, 0))
+                        success = insert_thai_text(page_pdf, str(text), x, y, font_size, (0, 0, 0), thai_fontname)
+                        if not success:
+                            print(f"⚠️ Failed to insert text: '{text}'")
                 
                 # Save the filled PDF
                 doc.save(output_path)
@@ -5798,6 +6273,8 @@ def main(page: ft.Page):
                 
                 status_text.value = f"✅ บันทึกแบบฟอร์มที่กรอกแล้วเรียบร้อย: {output_filename}"
                 status_text.color = ft.colors.GREEN_700
+                if not thai_fontname:
+                    status_text.value += " (คำเตือน: ไม่พบฟอนต์ไทย ใช้ฟอนต์เริ่มต้นแทน)"
                 page.update()
                 
             except Exception as e:
@@ -5809,19 +6286,277 @@ def main(page: ft.Page):
             """Preview PDF with overlay data using current coordinate settings"""
             preview_all_coordinates(e)
         
-        def load_from_database(e):
-            """Load data from database to fill the form"""
+        # Database record selection functionality
+        db_records_table = ft.DataTable(
+            columns=[
+                ft.DataColumn(ft.Text("ID")),
+                ft.DataColumn(ft.Text("ชื่อผู้จ่าย")),
+                ft.DataColumn(ft.Text("ชื่อผู้รับ")),
+                ft.DataColumn(ft.Text("จำนวนเงิน")),
+                ft.DataColumn(ft.Text("วันที่")),
+                ft.DataColumn(ft.Text("เลือก"))
+            ],
+            rows=[]
+        )
+        
+        # Data selection dialog
+        def show_data_selection_dialog():
+            """Show dialog with database records for selection"""
+            def close_dialog(e):
+                dialog.open = False
+                page.update()
+            
+            dialog = ft.AlertDialog(
+                modal=True,
+                title=ft.Text("เลือกข้อมูลจากฐานข้อมูล"),
+                content=ft.Container(
+                    content=ft.Column([
+                        ft.Text("เลือกรายการที่ต้องการโหลด:"),
+                        ft.Container(
+                            content=db_records_table,
+                            width=800,
+                            height=400,
+                            padding=10
+                        )
+                    ], scroll=ft.ScrollMode.AUTO),
+                    width=900,
+                    height=500
+                ),
+                actions=[
+                    ft.TextButton("ปิด", on_click=close_dialog)
+                ]
+            )
+            
+            page.dialog = dialog
+            dialog.open = True
+            page.update()
+        
+        def load_database_records():
+            """Load all records and show in a selection dialog with data grid"""
             try:
-                certificates = crystal_renderer.get_all_certificates()
-                if not certificates:
-                    status_text.value = "❌ ไม่พบข้อมูลในฐานข้อมูล"
-                    status_text.color = ft.colors.ORANGE_700
+                import psycopg2
+                conn_str = "postgresql://neondb_owner:npg_BidDY7RA4zWX@ep-long-haze-a17mcg70-pooler.ap-southeast-1.aws.neon.tech/program_tax?sslmode=require&channel_binding=require"
+                
+                # Check available tables first
+                available_tables = check_available_tables()
+                possible_tables = ['tax_certificates', 'certificate_records', 'certificates', 'transfer_records', 'withholding_tax']
+                table_to_use = None
+                
+                for table_name in possible_tables:
+                    if table_name in available_tables:
+                        table_to_use = table_name
+                        break
+                
+                if not table_to_use:
+                    status_text.value = f"❌ ไม่พบตารางข้อมูล (มีตาราง: {', '.join(available_tables)})"
+                    status_text.color = ft.colors.RED_700
                     page.update()
                     return
                 
-                # Use the latest certificate data
-                latest_cert = certificates[0]  # Get the most recent certificate
-                cert_data = crystal_renderer.get_certificate_by_id(latest_cert[0])
+                with psycopg2.connect(conn_str) as conn:
+                    with conn.cursor() as cur:
+                        # Get column information
+                        cur.execute(f"""
+                            SELECT column_name 
+                            FROM information_schema.columns 
+                            WHERE table_name = '{table_to_use}'
+                            ORDER BY ordinal_position
+                        """)
+                        columns = [col[0] for col in cur.fetchall()]
+                        
+                        # Get all records
+                        cur.execute(f"SELECT * FROM {table_to_use} ORDER BY id DESC LIMIT 50")  # Limit to 50 most recent
+                        records = cur.fetchall()
+                        
+                        if not records:
+                            status_text.value = f"⚠️ ไม่พบข้อมูลในตาราง {table_to_use}"
+                            status_text.color = ft.colors.ORANGE_700
+                            page.update()
+                            return
+                        
+                        # Create data grid
+                        data_rows = []
+                        
+                        # Create table columns - show first few important columns
+                        display_columns = []
+                        important_cols = ['id', 'withholder_name', 'holder_name', 'company_name', 'name', 
+                                        'withholdee_name', 'holdee_name', 'employee_name',
+                                        'certificate_no', 'cert_no', 'number', 'amount', 'salary_amount',
+                                        'date', 'created_date', 'issue_date']
+                        
+                        # Build display columns based on what's available
+                        col_indices = {}
+                        for i, col in enumerate(columns[:8]):  # Show max 8 columns for readability
+                            if col in important_cols or i < 5:  # Always show first 5 columns
+                                display_columns.append(ft.DataColumn(ft.Text(col, size=11, weight=ft.FontWeight.BOLD)))
+                                col_indices[col] = i
+                        
+                        # Build data rows
+                        for record in records:
+                            cells = []
+                            for col in col_indices.keys():
+                                idx = col_indices[col]
+                                value = str(record[idx]) if record[idx] is not None else ""
+                                # Truncate long values
+                                if len(value) > 20:
+                                    value = value[:17] + "..."
+                                cells.append(ft.DataCell(ft.Text(value, size=10)))
+                            
+                            # Make row clickable
+                            data_rows.append(ft.DataRow(
+                                cells=cells,
+                                on_select_changed=lambda e, rec=record, cols=columns: select_record_from_grid(rec, cols)
+                            ))
+                        
+                        # Create the data table
+                        data_grid = ft.DataTable(
+                            columns=display_columns,
+                            rows=data_rows,
+                            border=ft.border.all(2, ft.colors.GREY_400),
+                            border_radius=8,
+                            vertical_lines=ft.BorderSide(1, ft.colors.GREY_300),
+                            horizontal_lines=ft.BorderSide(1, ft.colors.GREY_300),
+                            heading_row_color=ft.colors.BLUE_50,
+                            heading_row_height=40,
+                            data_row_min_height=35,
+                            data_row_max_height=35,
+                            column_spacing=10,
+                        )
+                        
+                        # Create selection dialog
+                        def close_dialog(e):
+                            page.dialog.open = False
+                            page.update()
+                        
+                        dialog_content = ft.Column([
+                            ft.Text(f"🗂️ เลือกข้อมูลจากตาราง {table_to_use}", 
+                                   size=16, weight=ft.FontWeight.BOLD, color=ft.colors.BLUE_700),
+                            ft.Text(f"พบข้อมูล {len(records)} รายการ (แสดง 50 รายการล่าสุด)", 
+                                   size=12, color=ft.colors.GREY_600),
+                            ft.Container(
+                                content=data_grid,
+                                height=400,
+                                width=800,
+                                border=ft.border.all(1, ft.colors.GREY_300),
+                                border_radius=8,
+                                padding=10,
+                                bgcolor=ft.colors.WHITE
+                            ),
+                            ft.Row([
+                                ft.ElevatedButton("❌ ปิด", on_click=close_dialog,
+                                               style=ft.ButtonStyle(bgcolor=ft.colors.RED_700, color=ft.colors.WHITE)),
+                                ft.Text("👆 คลิกที่แถวเพื่อเลือกข้อมูล", size=12, color=ft.colors.GREEN_700, weight=ft.FontWeight.BOLD)
+                            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
+                        ], tight=True)
+                        
+                        # Show dialog
+                        dialog = ft.AlertDialog(
+                            title=ft.Text("📋 เลือกข้อมูลจากฐานข้อมูล"),
+                            content=dialog_content,
+                            modal=True
+                        )
+                        
+                        page.dialog = dialog
+                        dialog.open = True
+                        page.update()
+                        
+            except Exception as ex:
+                status_text.value = f"❌ ข้อผิดพลาดในการโหลดข้อมูล: {str(ex)}"
+                status_text.color = ft.colors.RED_700
+                page.update()
+                print(f"🚫 Load records error: {ex}")
+        
+        def select_record_from_grid(record, columns):
+            """Fill form when user selects a record from the grid"""
+            try:
+                # Create data dictionary
+                data_dict = dict(zip(columns, record))
+                print(f"📊 Selected record: ID={record[0]}")
+                
+                # Use the same field mapping as auto_fill_first_record
+                field_mappings = {
+                    'withholder_name': ['withholder_name', 'holder_name', 'company_name', 'name'],
+                    'withholder_address': ['withholder_address', 'holder_address', 'address'],
+                    'withholder_tax_id': ['withholder_tax_id', 'holder_tax_id', 'tax_id'],
+                    'withholdee_name': ['withholdee_name', 'holdee_name', 'employee_name'],
+                    'withholdee_address': ['withholdee_address', 'holdee_address', 'employee_address'],
+                    'withholdee_tax_id': ['withholdee_tax_id', 'holdee_tax_id', 'employee_tax_id'],
+                    'certificate_book_no': ['certificate_book_no', 'book_no', 'book_number'],
+                    'certificate_no': ['certificate_no', 'cert_no', 'number'],
+                    'sequence_in_form': ['sequence_in_form', 'sequence', 'seq_no'],
+                    'income_1_amount': ['income_1_amount', 'salary_amount', 'amount'],
+                    'income_1_tax': ['income_1_tax', 'salary_tax', 'tax_amount'],
+                    'income_2_amount': ['income_2_amount', 'bonus_amount', 'other_amount'],
+                    'income_2_tax': ['income_2_tax', 'bonus_tax', 'other_tax'],
+                    'issue_date': ['issue_date', 'date', 'created_date'],
+                    'signatory_name': ['signatory_name', 'signer_name', 'issued_by']
+                }
+                
+                def get_value_from_mapping(field_name):
+                    possible_cols = field_mappings.get(field_name, [field_name])
+                    for col in possible_cols:
+                        if col in data_dict and data_dict[col] is not None:
+                            return data_dict[col]
+                    return ""
+                
+                # Fill all form fields
+                withholder_name.value = str(get_value_from_mapping('withholder_name'))
+                withholder_address.value = str(get_value_from_mapping('withholder_address'))
+                withholder_tax_id.value = str(get_value_from_mapping('withholder_tax_id'))
+                
+                withholdee_name.value = str(get_value_from_mapping('withholdee_name'))
+                withholdee_address.value = str(get_value_from_mapping('withholdee_address'))
+                withholdee_tax_id.value = str(get_value_from_mapping('withholdee_tax_id'))
+                
+                certificate_book_no.value = str(get_value_from_mapping('certificate_book_no'))
+                certificate_no.value = str(get_value_from_mapping('certificate_no'))
+                sequence_in_form.value = str(get_value_from_mapping('sequence_in_form'))
+                
+                income_1_amount.value = str(get_value_from_mapping('income_1_amount') or "0")
+                income_1_tax.value = str(get_value_from_mapping('income_1_tax') or "0")
+                income_2_amount.value = str(get_value_from_mapping('income_2_amount') or "0")
+                income_2_tax.value = str(get_value_from_mapping('income_2_tax') or "0")
+                
+                provident_fund.value = "0"
+                social_security_fund.value = "0"
+                retirement_mutual_fund.value = "0"
+                
+                issue_date.value = str(get_value_from_mapping('issue_date'))
+                signatory_name.value = str(get_value_from_mapping('signatory_name'))
+                company_seal.value = False
+                
+                # Calculate totals
+                try:
+                    total_income = float(income_1_amount.value or 0) + float(income_2_amount.value or 0)
+                    total_tax = float(income_1_tax.value or 0) + float(income_2_tax.value or 0)
+                    total_income_display.value = f"{total_income:,.2f}"
+                    total_tax_display.value = f"{total_tax:,.2f}"
+                except:
+                    total_income_display.value = "0.00"
+                    total_tax_display.value = "0.00"
+                
+                # Close dialog
+                page.dialog.open = False
+                
+                # Load coordinate settings
+                load_coordinates_from_database()
+                
+                status_text.value = f"✅ โหลดข้อมูล ID: {record[0]} เรียบร้อย"
+                status_text.color = ft.colors.GREEN_700
+                page.update()
+                
+                print(f"✅ Form filled with record ID: {record[0]}")
+                
+            except Exception as ex:
+                status_text.value = f"❌ ข้อผิดพลาดในการเลือกข้อมูล: {str(ex)}"
+                status_text.color = ft.colors.RED_700
+                page.update()
+                print(f"🚫 Select record error: {ex}")
+        
+        def load_specific_record(cert_id):
+            """Load specific record data into form fields and coordinates"""
+            try:
+                cert_data = crystal_renderer.get_certificate_by_id(cert_id)
                 
                 if cert_data:
                     # Fill form fields with database data
@@ -5850,21 +6585,220 @@ def main(page: ft.Page):
                     company_seal.value = cert_data.get('company_seal', False)
                     total_tax_text.value = cert_data.get('total_tax_withheld_text', '')
                     
-                    # Calculate totals
-                    calculate_totals()
+                    # Calculate totals (need to define this function later)
+                    try:
+                        calculate_totals()
+                    except:
+                        pass  # Function might not be defined yet
                     
-                    status_text.value = f"✅ โหลดข้อมูลจากฐานข้อมูลเรียบร้อย (ID: {latest_cert[0]})"
+                    # Auto-load coordinate settings from database
+                    load_coordinates_from_database()
+                    
+                    # Close dialog
+                    page.dialog.open = False
+                    
+                    # Update the form
+                    page.update()
+                    
+                    status_text.value = f"✅ โหลดข้อมูลแล้ว: {cert_data.get('withholdee_name', 'ไม่ระบุชื่อ')} (ID: {cert_id})"
                     status_text.color = ft.colors.GREEN_700
                     page.update()
                 else:
-                    status_text.value = "❌ ไม่สามารถโหลดข้อมูลได้"
+                    status_text.value = "❌ ไม่สามารถดึงข้อมูลได้"
                     status_text.color = ft.colors.RED_700
                     page.update()
                     
             except Exception as e:
-                status_text.value = f"❌ ข้อผิดพลาดในการโหลดข้อมูล: {str(e)}"
+                status_text.value = f"❌ ข้อผิดพลาด: {str(e)}"
                 status_text.color = ft.colors.RED_700
                 page.update()
+        
+        def load_coordinates_from_database():
+            """Auto-load coordinate settings from database"""
+            try:
+                conn = get_db_connection_for_coords()
+                if not conn:
+                    return
+                    
+                cur = conn.cursor()
+                cur.execute("SELECT field_id, x, y, size FROM coordinate")
+                results = cur.fetchall()
+                
+                if results:
+                    # Update coordinate controls with database values
+                    for field_id, x, y, size in results:
+                        if field_id in coordinate_fields:
+                            coordinate_fields[field_id]['x'].value = str(x)
+                            coordinate_fields[field_id]['y'].value = str(y)
+                            coordinate_fields[field_id]['size'].value = str(size)
+                    
+                    status_text.value += " | 📍 พิกัดถูกโหลดจากฐานข้อมูล"
+                    page.update()
+                
+                conn.close()
+                
+            except Exception as e:
+                print(f"Coordinate load error: {e}")
+                # Don't show error to user for this secondary feature
+        
+        def load_from_database(e):
+            """Load data from database to fill the form - now shows selection dialog"""
+            load_database_records()
+        
+        def check_available_tables():
+            """Check what tables exist in the database"""
+            try:
+                import psycopg2
+                conn_str = "postgresql://neondb_owner:npg_BidDY7RA4zWX@ep-long-haze-a17mcg70-pooler.ap-southeast-1.aws.neon.tech/program_tax?sslmode=require&channel_binding=require"
+                
+                with psycopg2.connect(conn_str) as conn:
+                    with conn.cursor() as cur:
+                        # Check what tables exist
+                        cur.execute("""
+                            SELECT table_name 
+                            FROM information_schema.tables 
+                            WHERE table_schema = 'public'
+                            ORDER BY table_name
+                        """)
+                        tables = cur.fetchall()
+                        print("📋 Available tables in database:")
+                        for table in tables:
+                            print(f"  - {table[0]}")
+                        return [table[0] for table in tables]
+            except Exception as e:
+                print(f"❌ Error checking tables: {e}")
+                return []
+
+        def auto_fill_first_record(e):
+            """Auto-fill form with first record from database"""
+            try:
+                import psycopg2
+                conn_str = "postgresql://neondb_owner:npg_BidDY7RA4zWX@ep-long-haze-a17mcg70-pooler.ap-southeast-1.aws.neon.tech/program_tax?sslmode=require&channel_binding=require"
+                
+                # First check available tables
+                available_tables = check_available_tables()
+                
+                # Try different possible table names
+                possible_tables = ['tax_certificates', 'certificate_records', 'certificates', 'transfer_records', 'withholding_tax']
+                table_to_use = None
+                
+                for table_name in possible_tables:
+                    if table_name in available_tables:
+                        table_to_use = table_name
+                        print(f"✅ Using table: {table_name}")
+                        break
+                
+                if not table_to_use:
+                    status_text.value = f"❌ ไม่พบตารางข้อมูลที่เหมาะสม (มีตาราง: {', '.join(available_tables)})"
+                    status_text.color = ft.colors.RED_700
+                    page.update()
+                    return
+                
+                with psycopg2.connect(conn_str) as conn:
+                    with conn.cursor() as cur:
+                        # Get first record from the available table
+                        # First, check what columns exist in the table
+                        cur.execute(f"""
+                            SELECT column_name 
+                            FROM information_schema.columns 
+                            WHERE table_name = '{table_to_use}'
+                            ORDER BY ordinal_position
+                        """)
+                        columns = [col[0] for col in cur.fetchall()]
+                        print(f"📋 Columns in {table_to_use}: {columns}")
+                        
+                        # Get first record with available columns
+                        cur.execute(f"SELECT * FROM {table_to_use} ORDER BY id ASC LIMIT 1")
+                        
+                        result = cur.fetchone()
+                        if result:
+                            # Create a mapping of column names to values
+                            data_dict = dict(zip(columns, result))
+                            print(f"📊 Data found: {len(result)} fields")
+                            
+                            # Fill form fields based on available data
+                            # Use a flexible mapping approach
+                            field_mappings = {
+                                'withholder_name': ['withholder_name', 'holder_name', 'company_name', 'name'],
+                                'withholder_address': ['withholder_address', 'holder_address', 'address'],
+                                'withholder_tax_id': ['withholder_tax_id', 'holder_tax_id', 'tax_id'],
+                                'withholdee_name': ['withholdee_name', 'holdee_name', 'employee_name'],
+                                'withholdee_address': ['withholdee_address', 'holdee_address', 'employee_address'],
+                                'withholdee_tax_id': ['withholdee_tax_id', 'holdee_tax_id', 'employee_tax_id'],
+                                'certificate_book_no': ['certificate_book_no', 'book_no', 'book_number'],
+                                'certificate_no': ['certificate_no', 'cert_no', 'number'],
+                                'sequence_in_form': ['sequence_in_form', 'sequence', 'seq_no'],
+                                'income_1_amount': ['income_1_amount', 'salary_amount', 'amount'],
+                                'income_1_tax': ['income_1_tax', 'salary_tax', 'tax_amount'],
+                                'income_2_amount': ['income_2_amount', 'bonus_amount', 'other_amount'],
+                                'income_2_tax': ['income_2_tax', 'bonus_tax', 'other_tax'],
+                                'issue_date': ['issue_date', 'date', 'created_date'],
+                                'signatory_name': ['signatory_name', 'signer_name', 'issued_by']
+                            }
+                            
+                            # Helper function to find value from multiple possible column names
+                            def get_value_from_mapping(field_name):
+                                possible_cols = field_mappings.get(field_name, [field_name])
+                                for col in possible_cols:
+                                    if col in data_dict and data_dict[col] is not None:
+                                        return data_dict[col]
+                                return ""
+                            
+                            # Fill the form fields
+                            withholder_name.value = str(get_value_from_mapping('withholder_name'))
+                            withholder_address.value = str(get_value_from_mapping('withholder_address'))
+                            withholder_tax_id.value = str(get_value_from_mapping('withholder_tax_id'))
+                            
+                            withholdee_name.value = str(get_value_from_mapping('withholdee_name'))
+                            withholdee_address.value = str(get_value_from_mapping('withholdee_address'))
+                            withholdee_tax_id.value = str(get_value_from_mapping('withholdee_tax_id'))
+                            
+                            certificate_book_no.value = str(get_value_from_mapping('certificate_book_no'))
+                            certificate_no.value = str(get_value_from_mapping('certificate_no'))
+                            sequence_in_form.value = str(get_value_from_mapping('sequence_in_form'))
+                            
+                            income_1_amount.value = str(get_value_from_mapping('income_1_amount') or "0")
+                            income_1_tax.value = str(get_value_from_mapping('income_1_tax') or "0")
+                            income_2_amount.value = str(get_value_from_mapping('income_2_amount') or "0")
+                            income_2_tax.value = str(get_value_from_mapping('income_2_tax') or "0")
+                            
+                            provident_fund.value = "0"
+                            social_security_fund.value = "0"
+                            retirement_mutual_fund.value = "0"
+                            
+                            issue_date.value = str(get_value_from_mapping('issue_date'))
+                            signatory_name.value = str(get_value_from_mapping('signatory_name'))
+                            company_seal.value = False
+                            
+                            # Calculate totals
+                            try:
+                                total_income = float(income_1_amount.value or 0) + float(income_2_amount.value or 0)
+                                total_tax = float(income_1_tax.value or 0) + float(income_2_tax.value or 0)
+                                total_income_display.value = f"{total_income:,.2f}"
+                                total_tax_display.value = f"{total_tax:,.2f}"
+                            except:
+                                total_income_display.value = "0.00"
+                                total_tax_display.value = "0.00"
+                            
+                            status_text.value = f"✅ โหลดข้อมูลรายการแรกจาก {table_to_use} เรียบร้อย"
+                            status_text.color = ft.colors.GREEN_700
+                            
+                            # Also load coordinate settings from database
+                            load_coordinates_from_database()
+                            
+                            print(f"✅ Auto-filled form with first record from {table_to_use}")
+                            
+                        else:
+                            status_text.value = f"⚠️ ไม่พบข้อมูลในตาราง {table_to_use}"
+                            status_text.color = ft.colors.ORANGE_700
+                        
+                        page.update()
+                        
+            except Exception as ex:
+                status_text.value = f"❌ ข้อผิดพลาดในการโหลดข้อมูล: {str(ex)}"
+                status_text.color = ft.colors.RED_700
+                page.update()
+                print(f"🚫 Auto-fill error: {ex}")
         
         # Form fields
         withholder_name = ft.TextField(label="ชื่อผู้มีหน้าที่หักภาษี", width=400)
@@ -5933,6 +6867,14 @@ def main(page: ft.Page):
         # Event listeners
         for field in [income_1_amount, income_1_tax, income_2_amount, income_2_tax]:
             field.on_change = lambda e: calculate_totals()
+        
+        # Auto-load first record and coordinates on startup
+        try:
+            auto_fill_first_record(None)  # Pass None since we don't need the event
+        except Exception as e:
+            print(f"⚠️ Could not auto-load first record on startup: {e}")
+            # Just load coordinates if record loading fails
+            load_coordinates_from_database()
         
         def save_form(e):
             nonlocal last_certificate_id
@@ -6231,8 +7173,12 @@ def main(page: ft.Page):
                                     style=ft.ButtonStyle(bgcolor=ft.colors.CYAN_700, color=ft.colors.WHITE)),
                     ft.ElevatedButton("📄 กรอกใน PDF", on_click=fill_and_save_pdf,
                                     style=ft.ButtonStyle(bgcolor=ft.colors.GREEN_700, color=ft.colors.WHITE)),
-                    ft.ElevatedButton("📥 โหลดจากฐานข้อมูล", on_click=load_from_database,
+                    ft.ElevatedButton("🧪 ทดสอบภาษาไทย", on_click=test_thai_text_pdf,
+                                    style=ft.ButtonStyle(bgcolor=ft.colors.DEEP_ORANGE_700, color=ft.colors.WHITE)),
+                    ft.ElevatedButton("📋 เลือกจากฐานข้อมูล", on_click=load_from_database,
                                     style=ft.ButtonStyle(bgcolor=ft.colors.INDIGO_700, color=ft.colors.WHITE)),
+                    ft.ElevatedButton("🚀 โหลดรายการแรก", on_click=auto_fill_first_record,
+                                    style=ft.ButtonStyle(bgcolor=ft.colors.PINK_700, color=ft.colors.WHITE)),
                     ft.ElevatedButton("🗑️ เคลียร์ฟอร์ม", on_click=clear_form,
                                     style=ft.ButtonStyle(bgcolor=ft.colors.ORANGE_700, color=ft.colors.WHITE)),
                     ft.ElevatedButton("📋 ดูรายการ", on_click=view_certificates,
@@ -6446,10 +7392,18 @@ def main(page: ft.Page):
                         )
                     ]
                 )
-                
-            ], spacing=15, scroll=ft.ScrollMode.AUTO),
+
+              ], spacing=15, scroll=ft.ScrollMode.AUTO),
             padding=20
         )
+
+        # Initialize coordinate settings on first build (DB -> JSON -> defaults)
+        try:
+            initialize_coordinate_settings_once()
+        except Exception as _init_err:
+            print(f"Coordinate init hook error: {_init_err}")
+
+        return crystal_tab
     
     # Create navigation rail (add Import/Backup)
     nav_rail = ft.NavigationRail(
