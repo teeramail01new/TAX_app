@@ -1,7 +1,7 @@
 {
   "withholder_name": {
     "x": 70,
-    "y": 730,
+    "y": 735,
     "size": 10
   },
   "withholder_address": {
@@ -16,7 +16,7 @@
   },
   "withholdee_name": {
     "x": 70,
-    "y": 670,
+    "y": 660,
     "size": 10
   },
   "withholdee_address": {
@@ -70,7 +70,7 @@
     "size": 12
   },
   "total_tax": {
-    "x": 480,
+    "x": 500,
     "y": 180,
     "size": 12
   },
@@ -86,12 +86,12 @@
   },
   "social_security_fund": {
     "x": 380,
-    "y": 140,
+    "y": 145,
     "size": 10
   },
   "retirement_mutual_fund": {
     "x": 500,
-    "y": 140,
+    "y": 145,
     "size": 10
   },
   "issue_date": {
@@ -100,8 +100,8 @@
     "size": 10
   },
   "signatory_name": {
-    "x": 400,
-    "y": 670,
+    "x": 85,
+    "y": 120,
     "size": 10
   }
 }
