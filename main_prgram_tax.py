@@ -1419,9 +1419,22 @@ class TransferRecordsApp:
 
             # Read from Neon
             records = self.get_all_records()
-            if records:
+            # Normalize types for SQLite (convert Decimal/date/datetime)
+            try:
+                import datetime as _dt
+                from decimal import Decimal as _Dec
+                def _norm(val):
+                    if isinstance(val, _Dec):
+                        return float(val)
+                    if isinstance(val, (_dt.date, _dt.datetime)):
+                        return val.isoformat()
+                    return val
+                normalized_records = [tuple(_norm(v) for v in rec) for rec in records]
+            except Exception:
+                normalized_records = records
+            if normalized_records:
                 placeholders = ','.join(['?'] * 12)
-                s.executemany(f'INSERT INTO transfer_records VALUES ({placeholders})', records)
+                s.executemany(f'INSERT INTO transfer_records VALUES ({placeholders})', normalized_records)
             sconn.commit(); s.close(); sconn.close()
             return True, f"บันทึกสำรองไว้ที่ {os.path.abspath(sqlite_path)}", len(records)
         except Exception as ex:
@@ -1685,11 +1698,17 @@ def main(page: ft.Page):
             show_checkbox_column=False
         )
     
+    # State for dashboard selection → PDF fill
+    row_checkboxes = {}
+    selected_transfer_id_for_pdf = None
+
     # Full data grid
     def create_full_data_grid():
+        nonlocal row_checkboxes
         records = app.get_all_records()
         
         columns = [
+            ft.DataColumn(ft.Text("เลือก", weight=ft.FontWeight.BOLD)),
             ft.DataColumn(ft.Text("ID", weight=ft.FontWeight.BOLD)),
             ft.DataColumn(ft.Text("ชื่อ", weight=ft.FontWeight.BOLD)),
             ft.DataColumn(ft.Text("นามสกุล", weight=ft.FontWeight.BOLD)),
@@ -1705,9 +1724,13 @@ def main(page: ft.Page):
         ]
         
         rows = []
+        row_checkboxes.clear()
         for record in records:
+            cb = ft.Checkbox(value=False)
+            row_checkboxes[record[0]] = cb
             rows.append(
                 ft.DataRow(cells=[
+                    ft.DataCell(cb),
                     ft.DataCell(ft.Text(str(record[0]))),  # id
                     ft.DataCell(ft.Text(record[1])),  # name
                     ft.DataCell(ft.Text(record[2])),  # surname
@@ -1798,7 +1821,7 @@ def main(page: ft.Page):
             ], spacing=12),
             padding=20
         )
-
+        return crystal_tab
     def create_backup_tab():
         backup_status = ft.Text("", size=12)
         filename = ft.TextField(label="SQLite backup filename", value="backup.db", width=260)
@@ -2118,6 +2141,33 @@ def main(page: ft.Page):
     
     # Create tab content functions
     def create_dashboard_tab():
+        def set_selected_for_pdf(e=None):
+            nonlocal selected_transfer_id_for_pdf
+            # Choose the first checked row; if none, clear selection
+            chosen = None
+            for rec_id, cb in row_checkboxes.items():
+                if cb.value:
+                    chosen = rec_id
+                    break
+            selected_transfer_id_for_pdf = chosen
+            try:
+                page.update()
+            except:
+                pass
+
+        # Buttons to use selection
+        selection_bar = ft.Row([
+            ft.ElevatedButton(
+                text="✅ เลือกรายการเพื่อกรอก PDF",
+                icon=ft.Icons.CHECK_CIRCLE,
+                on_click=set_selected_for_pdf,
+                style=ft.ButtonStyle(bgcolor=ft.Colors.INDIGO_700, color=ft.Colors.WHITE),
+                tooltip="ใช้รายการที่เลือกเป็นแหล่งข้อมูลสำหรับกรอกลง PDF"
+            ),
+            ft.Text(lambda: f"เลือก ID: {selected_transfer_id_for_pdf}" if selected_transfer_id_for_pdf else "ยังไม่ได้เลือก",
+                   size=12, color=ft.Colors.GREY_700)
+        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
+
         return ft.Container(
             content=ft.Column([
                 # Header
@@ -2180,11 +2230,12 @@ def main(page: ft.Page):
                 
                 ft.Divider(height=30),
                 
-                # Data preview
-                ft.Text("ตัวอย่างข้อมูล", size=16, weight=ft.FontWeight.BOLD),
+                # All data grid (with selection checkbox)
+                ft.Text("ข้อมูลทั้งหมด", size=16, weight=ft.FontWeight.BOLD),
                 ft.Container(
                     content=ft.Column([
-                        data_table
+                        full_data_grid,
+                        selection_bar
                     ], scroll=ft.ScrollMode.AUTO),
                     height=400,
                     border=ft.border.all(1, ft.Colors.GREY_300),
@@ -6799,6 +6850,55 @@ def main(page: ft.Page):
                 status_text.color = ft.colors.RED_700
                 page.update()
                 print(f"🚫 Auto-fill error: {ex}")
+
+        def auto_fill_from_selected_dashboard():
+            """If a record was selected on the dashboard, load it into the form fields."""
+            try:
+                nonlocal selected_transfer_id_for_pdf
+                if not selected_transfer_id_for_pdf:
+                    return
+
+                import psycopg2
+                conn_str = "postgresql://neondb_owner:npg_BidDY7RA4zWX@ep-long-haze-a17mcg70-pooler.ap-southeast-1.aws.neon.tech/program_tax?sslmode=require&channel_binding=require"
+
+                with psycopg2.connect(conn_str) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            SELECT id, name, surname, transfer_amount, transfer_date, id_card, address, percent, total_amount, fee, net_amount, created_at
+                            FROM transfer_records
+                            WHERE id = %s
+                            """,
+                            (selected_transfer_id_for_pdf,)
+                        )
+                        rec = cur.fetchone()
+                        if not rec:
+                            return
+
+                        # Unpack
+                        (_id, _name, _surname, _amount, _date, _idcard, _address, _percent, _total, _fee, _net, _created) = rec
+
+                        # Map to crystal report fields (fill what we have)
+                        withholdee_name.value = f"{_name or ''} {_surname or ''}".strip()
+                        withholdee_address.value = _address or ""
+                        withholdee_tax_id.value = _idcard or ""
+                        # Put transfer amount into income_1_amount for preview/fill convenience
+                        income_1_amount.value = f"{float(_amount or 0):.2f}"
+                        income_1_tax.value = "0.00"
+                        income_2_amount.value = "0.00"
+                        income_2_tax.value = "0.00"
+                        # Totals presentation
+                        total_income_display.value = f"{float(_total or _amount or 0):,.2f}"
+                        total_tax_display.value = f"{float(_fee or 0):,.2f}"
+                        total_tax_text.value = ""
+                        issue_date.value = str(_date) if _date else ""
+                        certificate_no.value = str(_id)
+
+                        status_text.value = f"✅ โหลดจากแดชบอร์ด: ID {_id}"
+                        status_text.color = ft.colors.GREEN_700
+                        page.update()
+            except Exception as ex:
+                print(f"Dashboard autofill error: {ex}")
         
         # Form fields
         withholder_name = ft.TextField(label="ชื่อผู้มีหน้าที่หักภาษี", width=400)
@@ -7177,6 +7277,9 @@ def main(page: ft.Page):
                                     style=ft.ButtonStyle(bgcolor=ft.colors.DEEP_ORANGE_700, color=ft.colors.WHITE)),
                     ft.ElevatedButton("📋 เลือกจากฐานข้อมูล", on_click=load_from_database,
                                     style=ft.ButtonStyle(bgcolor=ft.colors.INDIGO_700, color=ft.colors.WHITE)),
+                    ft.ElevatedButton("⬇️ ดึงข้อมูลที่เลือก", on_click=lambda e: auto_fill_from_selected_dashboard(),
+                                    style=ft.ButtonStyle(bgcolor=ft.colors.BLUE_700, color=ft.colors.WHITE),
+                                    tooltip="ดึงข้อมูลจากแถวที่เลือกในหน้าแรกมาใส่ผู้ถูกหักภาษี"),
                     ft.ElevatedButton("🚀 โหลดรายการแรก", on_click=auto_fill_first_record,
                                     style=ft.ButtonStyle(bgcolor=ft.colors.PINK_700, color=ft.colors.WHITE)),
                     ft.ElevatedButton("🗑️ เคลียร์ฟอร์ม", on_click=clear_form,
@@ -7397,9 +7500,10 @@ def main(page: ft.Page):
             padding=20
         )
 
-        # Initialize coordinate settings on first build (DB -> JSON -> defaults)
+        # Initialize coordinate settings and auto-fill from dashboard selection (if any)
         try:
             initialize_coordinate_settings_once()
+            auto_fill_from_selected_dashboard()
         except Exception as _init_err:
             print(f"Coordinate init hook error: {_init_err}")
 
@@ -7444,11 +7548,6 @@ def main(page: ft.Page):
                 label="ใช้ฟอร์มราชการ",
             ),
             ft.NavigationRailDestination(
-                icon=ft.Icons.IMAGE_OUTLINED,
-                selected_icon=ft.Icons.IMAGE,
-                label="fill jpg form",
-            ),
-            ft.NavigationRailDestination(
                 icon=ft.Icons.ANALYTICS_OUTLINED,
                 selected_icon=ft.Icons.ANALYTICS,
                 label="form crystal report",
@@ -7487,12 +7586,10 @@ def main(page: ft.Page):
         elif selected_index == 5:
             content_area.content = create_official_tax_form_tab()
         elif selected_index == 6:
-            content_area.content = create_fill_jpg_form_tab()
-        elif selected_index == 7:
             content_area.content = create_crystal_report_tab()
-        elif selected_index == 8:
+        elif selected_index == 7:
             content_area.content = create_import_excel_tab()
-        elif selected_index == 9:
+        elif selected_index == 8:
             content_area.content = create_backup_tab()
         page.update()
     
