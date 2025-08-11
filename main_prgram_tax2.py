@@ -5125,7 +5125,6 @@ def main(page: ft.Page):
         
         # Coordinate adjustment controls
         coordinate_fields = {}
-        coordinate_tiles = {}
 
         # --- Database helpers for coordinate persistence ---
         DB_CONN_STR = "postgresql://neondb_owner:npg_BidDY7RA4zWX@ep-long-haze-a17mcg70-pooler.ap-southeast-1.aws.neon.tech/program_tax?sslmode=require&channel_binding=require"
@@ -5257,18 +5256,6 @@ def main(page: ft.Page):
                 ("retirement_mutual_fund", "กองทุนเลี้ยงชีพ", 480, 560, 10),
                 ("issue_date", "วันที่", 400, 620, 10),
                 ("signatory_name", "ผู้จ่ายเงิน", 400, 670, 10),
-                ("fee_payment_date", "วันที่ชำระค่าธรรมเนียม", 480, 620, 10),
-                # New dynamic card fields (เลขที่บัตร 1–10)
-                ("card_number_1", "เลขที่บัตร 1", 120, 530, 10),
-                ("card_number_2", "เลขที่บัตร 2", 180, 530, 10),
-                ("card_number_3", "เลขที่บัตร 3", 240, 530, 10),
-                ("card_number_4", "เลขที่บัตร 4", 300, 530, 10),
-                ("card_number_5", "เลขที่บัตร 5", 360, 530, 10),
-                ("card_number_6", "เลขที่บัตร 6", 420, 530, 10),
-                ("card_number_7", "เลขที่บัตร 7", 480, 530, 10),
-                ("card_number_8", "เลขที่บัตร 8", 540, 530, 10),
-                ("card_number_9", "เลขที่บัตร 9", 600, 530, 10),
-                ("card_number_10", "เลขที่บัตร 10", 660, 530, 10),
             ]
             
             coordinate_fields.clear()
@@ -5301,7 +5288,8 @@ def main(page: ft.Page):
                     'label': label
                 }
                 
-                tile = ft.ExpansionTile(
+                coordinate_controls.append(
+                    ft.ExpansionTile(
                         title=ft.Text(f"📍 {label}", size=12, weight=ft.FontWeight.BOLD),
                         subtitle=ft.Text(f"พิกัด: X={default_x}, Y={default_y}, ขนาด={default_size}", size=10),
                         controls=[
@@ -5321,8 +5309,7 @@ def main(page: ft.Page):
                         ],
                         initially_expanded=False
                     )
-                coordinate_controls.append(tile)
-                coordinate_tiles[field_id] = tile
+                )
             # Ensure DB table exists and try to load last saved coordinates into controls
             try:
                 ensure_coordinate_table()
@@ -5690,19 +5677,7 @@ def main(page: ft.Page):
                     "social_security_fund": (380, 560),
                     "retirement_mutual_fund": (480, 560),
                     "issue_date": (400, 620),
-                    "signatory_name": (400, 670),
-                    "fee_payment_date": (480, 620),
-                    # Defaults for card numbers
-                    "card_number_1": (120, 530),
-                    "card_number_2": (180, 530),
-                    "card_number_3": (240, 530),
-                    "card_number_4": (300, 530),
-                    "card_number_5": (360, 530),
-                    "card_number_6": (420, 530),
-                    "card_number_7": (480, 530),
-                    "card_number_8": (540, 530),
-                    "card_number_9": (600, 530),
-                    "card_number_10": (660, 530)
+                    "signatory_name": (400, 670)
                 }
                 
                 # Very small circles for precise positioning (16px diameter)
@@ -6316,29 +6291,6 @@ def main(page: ft.Page):
                         field_value = issue_date.value or ""
                     elif field_id == "signatory_name":
                         field_value = signatory_name.value or ""
-                    elif field_id == "fee_payment_date":
-                        field_value = fee_payment_date.value or ""
-                    # support dynamic card numbers (if user wants to overlay text there)
-                    elif field_id == "card_number_1":
-                        field_value = card_number_1.value or ""
-                    elif field_id == "card_number_2":
-                        field_value = card_number_2.value or ""
-                    elif field_id == "card_number_3":
-                        field_value = card_number_3.value or ""
-                    elif field_id == "card_number_4":
-                        field_value = card_number_4.value or ""
-                    elif field_id == "card_number_5":
-                        field_value = card_number_5.value or ""
-                    elif field_id == "card_number_6":
-                        field_value = card_number_6.value or ""
-                    elif field_id == "card_number_7":
-                        field_value = card_number_7.value or ""
-                    elif field_id == "card_number_8":
-                        field_value = card_number_8.value or ""
-                    elif field_id == "card_number_9":
-                        field_value = card_number_9.value or ""
-                    elif field_id == "card_number_10":
-                        field_value = card_number_10.value or ""
                     
                     if field_value:
                         # Convert Y coordinate from top to bottom (PDF coordinate system)
@@ -6606,19 +6558,6 @@ def main(page: ft.Page):
                 withholdee_name.value = str(get_value_from_mapping('withholdee_name'))
                 withholdee_address.value = str(get_value_from_mapping('withholdee_address'))
                 withholdee_tax_id.value = str(get_value_from_mapping('withholdee_tax_id'))
-                # Auto-split 13-digit tax ID into 5 parts for card_number_1..5 (when auto-fill from dashboard)
-                try:
-                    taxid = ''.join([ch for ch in (withholdee_tax_id.value or '') if ch.isdigit()])
-                    if len(taxid) == 13:
-                        card_number_1.value = taxid[0]
-                        card_number_2.value = taxid[1:5]
-                        card_number_3.value = taxid[5:10]
-                        card_number_4.value = taxid[10:12]
-                        card_number_5.value = taxid[12]
-                    else:
-                        card_number_1.value = card_number_2.value = card_number_3.value = card_number_4.value = card_number_5.value = ""
-                except Exception:
-                    card_number_1.value = card_number_2.value = card_number_3.value = card_number_4.value = card_number_5.value = ""
                 
                 certificate_book_no.value = str(get_value_from_mapping('certificate_book_no'))
                 certificate_no.value = str(get_value_from_mapping('certificate_no'))
@@ -7004,52 +6943,8 @@ def main(page: ft.Page):
             options=[ft.dropdown.Option("หักณที่จ่าย"), ft.dropdown.Option("ออกให้ตลอดไป")]
         )
         issue_date = ft.TextField(label="วันที่", width=200)
-        fee_payment_date = ft.TextField(label="วันที่ชำระค่าธรรมเนียม", width=200)
         signatory_name = ft.TextField(label="ชื่อผู้จ่ายเงิน", width=300)
         company_seal = ft.Checkbox(label="ประทับตรา", value=False)
-        # Extra inputs: เลขบัตร 10 ตำแหน่ง (ใช้ใส่ข้อความลง PDF ไม่บันทึกฐานข้อมูล)
-        card_number_1 = ft.TextField(label="เลขที่บัตร 1", width=180)
-        card_number_2 = ft.TextField(label="เลขที่บัตร 2", width=180)
-        card_number_3 = ft.TextField(label="เลขที่บัตร 3", width=180)
-        card_number_4 = ft.TextField(label="เลขที่บัตร 4", width=180)
-        card_number_5 = ft.TextField(label="เลขที่บัตร 5", width=180)
-        card_number_6 = ft.TextField(label="เลขที่บัตร 6", width=180)
-        card_number_7 = ft.TextField(label="เลขที่บัตร 7", width=180)
-        card_number_8 = ft.TextField(label="เลขที่บัตร 8", width=180)
-        card_number_9 = ft.TextField(label="เลขที่บัตร 9", width=180)
-        card_number_10 = ft.TextField(label="เลขที่บัตร 10", width=180)
-
-        def fill_card_numbers_from_tax_id(e=None):
-            try:
-                taxid = ''.join([ch for ch in (withholdee_tax_id.value or '') if ch.isdigit()])
-                if len(taxid) == 13:
-                    card_number_1.value = taxid[0]
-                    card_number_2.value = taxid[1:5]
-                    card_number_3.value = taxid[5:10]
-                    card_number_4.value = taxid[10:12]
-                    card_number_5.value = taxid[12]
-                else:
-                    card_number_1.value = card_number_2.value = card_number_3.value = card_number_4.value = card_number_5.value = ""
-                page.update()
-            except Exception:
-                card_number_1.value = card_number_2.value = card_number_3.value = card_number_4.value = card_number_5.value = ""
-                page.update()
-
-        def fill_card_numbers_from_withholder_tax_id(e=None):
-            try:
-                taxid = ''.join([ch for ch in (withholder_tax_id.value or '') if ch.isdigit()])
-                if len(taxid) == 13:
-                    card_number_6.value = taxid[0]
-                    card_number_7.value = taxid[1:5]
-                    card_number_8.value = taxid[5:10]
-                    card_number_9.value = taxid[10:12]
-                    card_number_10.value = taxid[12]
-                else:
-                    card_number_6.value = card_number_7.value = card_number_8.value = card_number_9.value = card_number_10.value = ""
-                page.update()
-            except Exception:
-                card_number_6.value = card_number_7.value = card_number_8.value = card_number_9.value = card_number_10.value = ""
-                page.update()
         
         # Total fields
         total_income_display = ft.TextField(label="รวมเงินที่จ่าย", width=200, read_only=True)
@@ -7463,42 +7358,10 @@ def main(page: ft.Page):
                         ft.Container(
                             content=ft.Column([
                                 ft.Row([provident_fund, social_security_fund, retirement_mutual_fund], spacing=10),
-                                ft.Row([issue_type, issue_date, fee_payment_date], spacing=10),
+                                ft.Row([issue_type, issue_date], spacing=10),
                                 ft.Row([signatory_name, company_seal], spacing=10)
                             ], spacing=10),
                             padding=10
-                        )
-                    ]
-                ),
-                # New section: เลขบัตรสิบตำแหน่ง
-                ft.ExpansionTile(
-                    title=ft.Text("เลขบัตรสิบตำแหน่ง", weight=ft.FontWeight.BOLD),
-                    initially_expanded=False,
-                    controls=[
-                        ft.Container(
-                            content=ft.Column([
-                                ft.Text("กรอกข้อความเพื่อใส่ลง PDF (ไม่บันทึกฐานข้อมูล)", size=12, color=ft.colors.GREY_700),
-                                ft.Row([card_number_1, card_number_2, card_number_3, card_number_4, card_number_5], spacing=10, wrap=True),
-                                ft.Row([card_number_6, card_number_7, card_number_8, card_number_9, card_number_10], spacing=10, wrap=True),
-                                ft.Row([
-                                    ft.ElevatedButton(
-                                        "เติมเลขที่บัตร",
-                                        icon=ft.icons.NUMBERS,
-                                        on_click=fill_card_numbers_from_tax_id,
-                                        style=ft.ButtonStyle(bgcolor=ft.colors.BLUE_700, color=ft.colors.WHITE)
-                                    )
-                                    ,
-                                    ft.ElevatedButton(
-                                        "เติมเลขที่บัตร (ผู้มีหน้าที่หักภาษี)",
-                                        icon=ft.icons.NUMBERS,
-                                        on_click=fill_card_numbers_from_withholder_tax_id,
-                                        style=ft.ButtonStyle(bgcolor=ft.colors.INDIGO_700, color=ft.colors.WHITE)
-                                    )
-                                ])
-                            ], spacing=10),
-                            padding=10,
-                            bgcolor=ft.colors.GREY_50,
-                            border_radius=10
                         )
                     ]
                 ),
@@ -7594,7 +7457,7 @@ def main(page: ft.Page):
                     controls=[
                         ft.Container(
                             content=ft.Column([
-                ft.Row([
+                                ft.Row([
                                     ft.ElevatedButton("🔍 ทดสอบทุกฟิลด์", on_click=preview_all_coordinates,
                                                     style=ft.ButtonStyle(bgcolor=ft.colors.PURPLE_700, color=ft.colors.WHITE)),
                                     ft.ElevatedButton("📸 บันทึกเป็น PNG", on_click=save_coordinate_test_png,
@@ -7604,22 +7467,6 @@ def main(page: ft.Page):
                                     ft.ElevatedButton("📂 โหลดการตั้งค่า", on_click=load_coordinates_config,
                                                     style=ft.ButtonStyle(bgcolor=ft.colors.ORANGE_700, color=ft.colors.WHITE)),
                                 ], spacing=10),
-                # Quick-select buttons row: ผู้จ่ายเงิน + เลขที่บัตร 1–5
-                ft.Row([
-                    ft.Text("เมนูเลือกฟิลด์อย่างรวดเร็ว:", weight=ft.FontWeight.BOLD),
-                    ft.OutlinedButton("ผู้จ่ายเงิน", on_click=lambda e: (test_single_field("signatory_name"))),
-                    ft.OutlinedButton("วันที่ชำระค่าธรรมเนียม", on_click=lambda e: (test_single_field("fee_payment_date"))),
-                    ft.OutlinedButton("เลขที่บัตร 1", on_click=lambda e: (test_single_field("card_number_1"))),
-                    ft.OutlinedButton("เลขที่บัตร 2", on_click=lambda e: (test_single_field("card_number_2"))),
-                    ft.OutlinedButton("เลขที่บัตร 3", on_click=lambda e: (test_single_field("card_number_3"))),
-                    ft.OutlinedButton("เลขที่บัตร 4", on_click=lambda e: (test_single_field("card_number_4"))),
-                    ft.OutlinedButton("เลขที่บัตร 5", on_click=lambda e: (test_single_field("card_number_5"))),
-                    ft.OutlinedButton("เลขที่บัตร 6", on_click=lambda e: (test_single_field("card_number_6"))),
-                    ft.OutlinedButton("เลขที่บัตร 7", on_click=lambda e: (test_single_field("card_number_7"))),
-                    ft.OutlinedButton("เลขที่บัตร 8", on_click=lambda e: (test_single_field("card_number_8"))),
-                    ft.OutlinedButton("เลขที่บัตร 9", on_click=lambda e: (test_single_field("card_number_9"))),
-                    ft.OutlinedButton("เลขที่บัตร 10", on_click=lambda e: (test_single_field("card_number_10"))),
-                ], spacing=8, wrap=True),
                                 ft.Row([
                                     # Coordinate controls on the left
                                     ft.Container(
