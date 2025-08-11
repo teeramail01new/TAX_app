@@ -11,7 +11,7 @@
   },
   "withholder_tax_id": {
     "x": 380,
-    "y": 750,
+    "y": 880,
     "size": 10
   },
   "withholdee_name": {
@@ -26,7 +26,7 @@
   },
   "withholdee_tax_id": {
     "x": 380,
-    "y": 680,
+    "y": 880,
     "size": 10
   },
   "certificate_book_no": {
@@ -36,7 +36,7 @@
   },
   "certificate_no": {
     "x": 200,
-    "y": 160,
+    "y": 880,
     "size": 10
   },
   "form_type": {
@@ -101,7 +101,62 @@
   },
   "signatory_name": {
     "x": 85,
-    "y": 120,
+    "y": 880,
+    "size": 10
+  },
+  "fee_payment_date": {
+    "x": 340,
+    "y": 520,
+    "size": 10
+  },
+  "card_number_1": {
+    "x": 380,
+    "y": 750,
+    "size": 10
+  },
+  "card_number_2": {
+    "x": 395,
+    "y": 750,
+    "size": 10
+  },
+  "card_number_3": {
+    "x": 450,
+    "y": 750,
+    "size": 10
+  },
+  "card_number_4": {
+    "x": 515,
+    "y": 750,
+    "size": 10
+  },
+  "card_number_5": {
+    "x": 550,
+    "y": 750,
+    "size": 10
+  },
+  "card_number_6": {
+    "x": 380,
+    "y": 680,
+    "size": 10
+  },
+  "card_number_7": {
+    "x": 395,
+    "y": 680,
+    "size": 10
+  },
+  "card_number_8": {
+    "x": 450,
+    "y": 680,
+    "size": 10
+  },
+  "card_number_9": {
+    "x": 515,
+    "y": 680,
+    "size": 10
+  },
+  "card_number_10": {
+    "x": 550,
+    "y": 680,
     "size": 10
   }
 }

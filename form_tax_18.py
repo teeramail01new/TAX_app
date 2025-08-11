@@ -35,6 +35,8 @@ class CrystalReportStyleRenderer:
         self.init_database()
         self.setup_fonts()
         self.setup_report_engine()
+        # Load custom coordinates for dynamic fields (e.g. เลขที่บัตร 1-5)
+        self.coordinates_config = self.load_custom_coordinates()
         
     def setup_fonts(self):
         """Setup fonts similar to Crystal Reports"""
@@ -86,6 +88,82 @@ class CrystalReportStyleRenderer:
             }
         }
         
+    def load_custom_coordinates(self) -> dict:
+        """Load coordinate configuration for dynamic text fields from pdf_coordinates.json.
+        Falls back to sane defaults if file or keys are missing.
+        Structure in file:
+        {
+          "crystal": {
+            "card_numbers": {
+              "card_number_1": {"x": 120, "y": 530, "size": 11, "width": 150, "align": "left"},
+              ...
+            }
+          }
+        }
+        """
+        default_cards = {
+            f"card_number_{i}": {"x": 120 + (i - 1) * 80, "y": 530, "size": 11, "width": 70, "height": 20, "align": "left"}
+            for i in range(1, 6)
+        }
+        cfg = {"crystal": {"card_numbers": default_cards}}
+        try:
+            if os.path.exists("pdf_coordinates.json"):
+                with open("pdf_coordinates.json", "r", encoding="utf-8") as f:
+                    file_cfg = json.load(f)
+                # Merge (preserve defaults for missing keys)
+                crystal = file_cfg.get("crystal", {})
+                cards = crystal.get("card_numbers", {})
+                for k, v in default_cards.items():
+                    if k not in cards or not isinstance(cards[k], dict):
+                        cards[k] = v
+                    else:
+                        for kk, vv in v.items():
+                            cards[k].setdefault(kk, vv)
+                cfg["crystal"]["card_numbers"] = cards
+                return cfg
+        except Exception as e:
+            print(f"Coordinate config load error: {e}")
+        return cfg
+
+    def save_custom_coordinates(self, new_cards: dict) -> bool:
+        """Persist updated coordinates for card number fields into pdf_coordinates.json."""
+        try:
+            # Load existing
+            file_cfg = {}
+            if os.path.exists("pdf_coordinates.json"):
+                try:
+                    with open("pdf_coordinates.json", "r", encoding="utf-8") as f:
+                        file_cfg = json.load(f)
+                except Exception:
+                    file_cfg = {}
+            if "crystal" not in file_cfg:
+                file_cfg["crystal"] = {}
+            file_cfg["crystal"]["card_numbers"] = new_cards
+            with open("pdf_coordinates.json", "w", encoding="utf-8") as f:
+                json.dump(file_cfg, f, ensure_ascii=False, indent=2)
+            # Update in-memory
+            self.coordinates_config = {"crystal": {"card_numbers": new_cards}}
+            return True
+        except Exception as e:
+            print(f"Coordinate config save error: {e}")
+            return False
+
+    def get_card_fields_config(self) -> dict:
+        """Return field configurations for card_number_1..5 using current coordinate config."""
+        cards_cfg = self.coordinates_config.get("crystal", {}).get("card_numbers", {})
+        result = {}
+        for key, v in cards_cfg.items():
+            result[key] = {
+                "x": float(v.get("x", 120)),
+                "y": float(v.get("y", 530)),
+                "font": self.fonts.get("data", self.thai_font),
+                "size": int(v.get("size", 11)),
+                "width": float(v.get("width", 70)),
+                "height": float(v.get("height", 20)),
+                "align": v.get("align", "left")
+            }
+        return result
+
     def convert_pdf_to_background_image(self):
         """Convert PDF template to background image for Crystal Reports style rendering"""
         try:
@@ -185,7 +263,7 @@ class CrystalReportStyleRenderer:
     
     def get_field_configurations(self):
         """Get field configurations similar to Crystal Reports field objects"""
-        return {
+        base_cfg = {
             'withholder_name': {
                 'x': 150, 'y': 650, 'font': self.fonts['bold'], 'size': 12,
                 'width': 300, 'height': 20, 'align': 'left'
@@ -284,6 +362,9 @@ class CrystalReportStyleRenderer:
                 'width': 200, 'height': 20, 'align': 'left'
             },
         }
+        # Merge in dynamic card number fields
+        base_cfg.update(self.get_card_fields_config())
+        return base_cfg
     
     def render_text_field(self, canvas, config, value):
         """Render text field similar to Crystal Reports text objects"""
@@ -766,6 +847,104 @@ def main(page: ft.Page):
     issue_date = ft.TextField(label="วันที่", width=200)
     signatory_name = ft.TextField(label="ชื่อผู้จ่ายเงิน", width=300)
     company_seal = ft.Checkbox(label="ประทับตรา", value=False)
+
+    # Crystal Report extra fields: เลขที่บัตร 1-5 (not stored in DB; injected at render time)
+    card_number_1 = ft.TextField(label="เลขที่บัตร 1", width=180)
+    card_number_2 = ft.TextField(label="เลขที่บัตร 2", width=180)
+    card_number_3 = ft.TextField(label="เลขที่บัตร 3", width=180)
+    card_number_4 = ft.TextField(label="เลขที่บัตร 4", width=180)
+    card_number_5 = ft.TextField(label="เลขที่บัตร 5", width=180)
+
+    # Coordinate editor for the five card fields
+    coord_inputs = {}
+    def load_card_coord_fields_from_config():
+        cards_cfg = app.coordinates_config.get("crystal", {}).get("card_numbers", {})
+        for i in range(1, 6):
+            key = f"card_number_{i}"
+            cfg = cards_cfg.get(key, {})
+            coord_inputs[key] = {
+                "x": ft.TextField(label=f"X {i}", width=100, value=str(cfg.get("x", 120)), keyboard_type=ft.KeyboardType.NUMBER),
+                "y": ft.TextField(label=f"Y {i}", width=100, value=str(cfg.get("y", 530)), keyboard_type=ft.KeyboardType.NUMBER),
+                "size": ft.TextField(label=f"ขนาด {i}", width=100, value=str(cfg.get("size", 11)), keyboard_type=ft.KeyboardType.NUMBER),
+                "width": ft.TextField(label=f"ความกว้าง {i}", width=120, value=str(cfg.get("width", 70)), keyboard_type=ft.KeyboardType.NUMBER),
+                "align": ft.Dropdown(label=f"จัดวาง {i}", width=130, value=str(cfg.get("align", "left")), options=[
+                    ft.dropdown.Option("left"), ft.dropdown.Option("center"), ft.dropdown.Option("right")
+                ])
+            }
+    load_card_coord_fields_from_config()
+
+    def save_card_coords(e):
+        # Gather and persist
+        new_cards = {}
+        try:
+            for i in range(1, 6):
+                key = f"card_number_{i}"
+                fields = coord_inputs[key]
+                new_cards[key] = {
+                    "x": float(fields["x"].value or 0),
+                    "y": float(fields["y"].value or 0),
+                    "size": int(float(fields["size"].value or 11)),
+                    "width": float(fields["width"].value or 70),
+                    "height": 20,
+                    "align": fields["align"].value or "left",
+                }
+            ok = app.save_custom_coordinates(new_cards)
+            status_text.value = ("✅ " if ok else "❌ ") + ("บันทึกพิกัดเลขที่บัตรแล้ว" if ok else "บันทึกพิกัดไม่สำเร็จ")
+            status_text.color = ft.colors.GREEN_700 if ok else ft.colors.RED_700
+            page.update()
+        except Exception as ex:
+            status_text.value = f"❌ เกิดข้อผิดพลาดในการบันทึกพิกัด: {ex}"
+            status_text.color = ft.colors.RED_700
+            page.update()
+
+    # Menu: ปรับตำแหน่งฟิลด์ pdf – add 5 buttons after "ผู้จ่ายเงิน"
+    selected_coord_field_label = ft.Text("ฟิลด์ที่เลือก: -", size=12, color=ft.colors.GREY_700)
+    card_item_containers: Dict[str, ft.Container] = {}
+
+    def build_card_coord_items():
+        items = []
+        for i in range(1, 6):
+            key = f"card_number_{i}"
+            container = ft.Container(
+                content=ft.Row([
+                    ft.Text(f"เลขที่บัตร {i}", weight=ft.FontWeight.BOLD),
+                    coord_inputs[key]["x"],
+                    coord_inputs[key]["y"],
+                    coord_inputs[key]["size"],
+                    coord_inputs[key]["width"],
+                    coord_inputs[key]["align"],
+                ], spacing=8, wrap=True),
+                bgcolor=ft.colors.WHITE,
+                padding=8,
+                border_radius=6,
+                border=ft.border.all(1, ft.colors.GREY_300),
+            )
+            card_item_containers[key] = container
+            items.append(container)
+        return items
+
+    def select_coord_target(key: str, label: str):
+        # Highlight selected card container if exists
+        try:
+            for k, c in card_item_containers.items():
+                c.bgcolor = ft.colors.WHITE
+                c.border = ft.border.all(1, ft.colors.GREY_300)
+            if key in card_item_containers:
+                c = card_item_containers[key]
+                c.bgcolor = ft.colors.YELLOW_50
+                c.border = ft.border.all(2, ft.colors.AMBER_500)
+        except Exception:
+            pass
+        selected_coord_field_label.value = f"ฟิลด์ที่เลือก: {label}"
+        page.update()
+
+    btn_signatory = ft.OutlinedButton("ผู้จ่ายเงิน", on_click=lambda e: select_coord_target("signatory_name", "ผู้จ่ายเงิน"))
+    btn_card_1 = ft.OutlinedButton("เลขที่บัตร 1", on_click=lambda e: select_coord_target("card_number_1", "เลขที่บัตร 1"))
+    btn_card_2 = ft.OutlinedButton("เลขที่บัตร 2", on_click=lambda e: select_coord_target("card_number_2", "เลขที่บัตร 2"))
+    btn_card_3 = ft.OutlinedButton("เลขที่บัตร 3", on_click=lambda e: select_coord_target("card_number_3", "เลขที่บัตร 3"))
+    btn_card_4 = ft.OutlinedButton("เลขที่บัตร 4", on_click=lambda e: select_coord_target("card_number_4", "เลขที่บัตร 4"))
+    btn_card_5 = ft.OutlinedButton("เลขที่บัตร 5", on_click=lambda e: select_coord_target("card_number_5", "เลขที่บัตร 5"))
+    card_coord_list_controls = build_card_coord_items()
     
     # Total fields
     total_income_display = ft.TextField(label="รวมเงินที่จ่าย", width=200, read_only=True)
@@ -844,6 +1023,14 @@ def main(page: ft.Page):
             if cert_data:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 pdf_filename = f"crystal_report_{last_certificate_id}_{timestamp}.pdf"
+                # Inject temporary card numbers (not stored in DB)
+                cert_data.update({
+                    "card_number_1": card_number_1.value or "",
+                    "card_number_2": card_number_2.value or "",
+                    "card_number_3": card_number_3.value or "",
+                    "card_number_4": card_number_4.value or "",
+                    "card_number_5": card_number_5.value or "",
+                })
                 success, message = app.create_crystal_report_pdf(cert_data, pdf_filename)
                 
                 if success:
@@ -923,7 +1110,8 @@ def main(page: ft.Page):
                       certificate_book_no, certificate_no, sequence_in_form,
                       income_1_amount, income_1_tax, income_2_amount, income_2_tax,
                       provident_fund, social_security_fund, retirement_mutual_fund,
-                      issue_date, signatory_name, total_tax_text]:
+                      issue_date, signatory_name, total_tax_text,
+                      card_number_1, card_number_2, card_number_3, card_number_4, card_number_5]:
             if hasattr(field, 'value'):
                 field.value = "0" if field in [income_1_amount, income_1_tax, income_2_amount, income_2_tax,
                                                provident_fund, social_security_fund, retirement_mutual_fund] else ""
@@ -1299,6 +1487,22 @@ def main(page: ft.Page):
                         )
                     ]
                 ),
+                # New section: เลขบัตรห้าตำแหน่ง (after funds & signature)
+                ft.ExpansionTile(
+                    title=ft.Text("เลขบัตรห้าตำแหน่ง", weight=ft.FontWeight.BOLD),
+                    initially_expanded=False,
+                    controls=[
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Text("กรอกข้อความเพื่อใส่ลง PDF (ไม่บันทึกฐานข้อมูล)", size=12, color=ft.colors.GREY_700),
+                                ft.Row([card_number_1, card_number_2, card_number_3, card_number_4, card_number_5], spacing=10, wrap=True),
+                            ], spacing=10),
+                            padding=10,
+                            bgcolor=ft.colors.GREY_50,
+                            border_radius=10
+                        )
+                    ]
+                ),
                 
                 # Crystal Reports methodology explanation
                 ft.ExpansionTile(
@@ -1383,6 +1587,47 @@ def main(page: ft.Page):
                     ]
                 )
                 ,
+                # PDF coordinate tuning panel
+                ft.ExpansionTile(
+                    title=ft.Text("ปรับตำแหน่งฟิลด์ pdf", weight=ft.FontWeight.BOLD, color=ft.colors.BLUE_700),
+                    initially_expanded=True,
+                    controls=[
+                        ft.Container(
+                            content=ft.Column([
+                                # Quick selection menu row (add 5 buttons after ผู้จ่ายเงิน)
+                                ft.Row([
+                                    ft.Text("เมนูเลือกฟิลด์อย่างรวดเร็ว:", weight=ft.FontWeight.BOLD),
+                                    btn_signatory,
+                                    btn_card_1,
+                                    btn_card_2,
+                                    btn_card_3,
+                                    btn_card_4,
+                                    btn_card_5,
+                                ], spacing=8, wrap=True),
+                                selected_coord_field_label,
+                                ft.Text("ค่าชั่วคราวสำหรับใส่ใน PDF (ไม่บันทึกฐานข้อมูล)", size=12, color=ft.colors.GREY_700),
+                                ft.Row([card_number_1, card_number_2, card_number_3, card_number_4, card_number_5], spacing=10, wrap=True),
+                                ft.Divider(),
+                                ft.Text("ตั้งค่าพิกัดตำแหน่งใน PDF", weight=ft.FontWeight.BOLD),
+                                ft.Text("หน่วยเป็นจุด (pt) จากมุมซ้ายล่างของหน้า A4 ตามระบบของ ReportLab", size=11, color=ft.colors.GREY_700),
+                                # ListView for coordinate items (append 5 new items for card numbers)
+                                ft.ListView(
+                                    expand=False,
+                                    spacing=6,
+                                    padding=ft.padding.all(0),
+                                    controls=card_coord_list_controls
+                                ),
+                                ft.Row([
+                                    ft.ElevatedButton("บันทึกพิกัด", icon=ft.icons.SAVE, on_click=save_card_coords,
+                                                     style=ft.ButtonStyle(bgcolor=ft.colors.GREEN_700, color=ft.colors.WHITE)),
+                                ], alignment=ft.MainAxisAlignment.START)
+                            ], spacing=10),
+                            padding=10,
+                            bgcolor=ft.colors.BLUE_50,
+                            border_radius=10
+                        )
+                    ]
+                ),
                 # Backup database tab
                 ft.ExpansionTile(
                     title=ft.Text("💾 Backup database", weight=ft.FontWeight.BOLD, color=ft.colors.BLUE_700),
