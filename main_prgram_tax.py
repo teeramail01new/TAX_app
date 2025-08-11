@@ -1,4 +1,13 @@
 import flet as ft
+# Compatibility aliases for different Flet versions (Icons/Colors vs icons/colors)
+try:
+    # On some versions attributes are CamelCase (Icons/Colors). Create lowercase aliases if needed.
+    if not hasattr(ft, "colors") and hasattr(ft, "Colors"):
+        setattr(ft, "colors", ft.Colors)
+    if not hasattr(ft, "icons") and hasattr(ft, "Icons"):
+        setattr(ft, "icons", ft.Icons)
+except Exception:
+    pass
 import psycopg2
 import pandas as pd
 from datetime import datetime
