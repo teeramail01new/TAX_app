@@ -1842,6 +1842,257 @@ def main(page: ft.Page):
             padding=20
         )
 
+    # New Tab: Import withholder addresses from Excel (Neon JSONB table)
+    pending_withholder_import_data = None  # payload passed into crystal report tab
+    def create_import_withholder_excel_tab():
+        status = ft.Text("", size=12)
+        info_text = ft.Text("ไฟล์ต้นทาง: C:\\program_tax\\tax_address.xlsx", size=12, color=ft.colors.GREY_700)
+
+        # Grid state
+        current_columns: list[str] = []
+        row_selection: dict[int, bool] = {}
+        data_items: list[dict] = []
+        data_table = ft.DataTable(columns=[], rows=[], column_spacing=12)
+
+        DB_CONN_STR = "postgresql://neondb_owner:npg_BidDY7RA4zWX@ep-long-haze-a17mcg70-pooler.ap-southeast-1.aws.neon.tech/program_tax?sslmode=require&channel_binding=require"
+        TABLE_NAME = "withholder_address_book"
+
+        def get_conn():
+            try:
+                return psycopg2.connect(DB_CONN_STR)
+            except Exception as ex:
+                print(f"Withholder DB conn error: {ex}")
+                return None
+
+        def ensure_table():
+            conn = get_conn()
+            if not conn:
+                return False
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+                        id SERIAL PRIMARY KEY,
+                        data JSONB NOT NULL,
+                        created_at TIMESTAMPTZ DEFAULT now()
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_{TABLE_NAME}_created_at ON {TABLE_NAME}(created_at DESC);
+                    """
+                )
+                conn.commit()
+                return True
+            except Exception as ex:
+                print(f"Ensure table error: {ex}")
+                conn.rollback()
+                return False
+            finally:
+                try:
+                    cur.close(); conn.close()
+                except Exception:
+                    pass
+
+        def import_fixed_excel(path: str) -> tuple[bool, str, int, list[str]]:
+            try:
+                import pandas as pd
+                if not os.path.exists(path):
+                    return False, f"ไม่พบไฟล์: {path}", 0, []
+                df = pd.read_excel(path)
+                if df.empty:
+                    return False, "ไฟล์ว่างเปล่า", 0, []
+                # Normalize NaN to None
+                df = df.where(pd.notnull(df), None)
+                cols = list(df.columns)
+                records = df.to_dict(orient="records")
+
+                conn = get_conn()
+                if not conn:
+                    return False, "เชื่อมต่อฐานข้อมูลไม่สำเร็จ", 0, []
+                try:
+                    ensure_table()
+                    from psycopg2.extras import execute_values, Json
+                    cur = conn.cursor()
+                    insert_sql = f"INSERT INTO {TABLE_NAME} (data) VALUES %s"
+                    values = [(Json(r),) for r in records]
+                    execute_values(cur, insert_sql, values)
+                    conn.commit()
+                    return True, f"นำเข้า {len(records)} รายการ", len(records), cols
+                except Exception as ex:
+                    conn.rollback()
+                    return False, f"นำเข้าไม่สำเร็จ: {ex}", 0, []
+                finally:
+                    try:
+                        cur.close(); conn.close()
+                    except Exception:
+                        pass
+            except Exception as ex:
+                return False, f"อ่าน Excel ไม่สำเร็จ: {ex}", 0, []
+
+        def fetch_latest(limit: int = 100) -> tuple[list[str], list[dict]]:
+            conn = get_conn()
+            if not conn:
+                return [], []
+            try:
+                ensure_table()
+                cur = conn.cursor()
+                cur.execute(f"SELECT data FROM {TABLE_NAME} ORDER BY created_at DESC, id DESC LIMIT %s", (limit,))
+                rows = cur.fetchall()
+                items = [r[0] for r in rows]
+                # Determine columns: use keys from first row
+                cols = []
+                for item in items:
+                    if isinstance(item, dict) and item:
+                        cols = list(item.keys())
+                        break
+                return cols, items
+            except Exception as ex:
+                print(f"Fetch error: {ex}")
+                return [], []
+            finally:
+                try:
+                    cur.close(); conn.close()
+                except Exception:
+                    pass
+
+        def refresh_grid():
+            nonlocal current_columns
+            cols, items = fetch_latest()
+            # Save items to state
+            nonlocal data_items, row_selection
+            data_items = items
+            # Ensure selection dict size
+            row_selection = {i: row_selection.get(i, False) for i in range(len(data_items))}
+            if cols:
+                current_columns = cols
+            # Build columns
+            data_table.columns = [ft.DataColumn(ft.Text("เลือก")), ft.DataColumn(ft.Text("#"))] + [ft.DataColumn(ft.Text(c)) for c in current_columns[:8]]
+            # Build rows
+            rows = []
+            for idx, item in enumerate(data_items, start=1):
+                # selection checkbox
+                def make_on_change(i: int):
+                    return lambda e: row_selection.__setitem__(i, bool(e.control.value))
+                checkbox = ft.Checkbox(value=row_selection.get(idx-1, False), on_change=make_on_change(idx-1))
+                cells = [ft.DataCell(checkbox), ft.DataCell(ft.Text(str(idx)))]
+                for c in current_columns[:8]:
+                    v = item.get(c, "") if isinstance(item, dict) else ""
+                    cells.append(ft.DataCell(ft.Text(str(v) if v is not None else "")))
+                rows.append(ft.DataRow(cells=cells))
+            data_table.rows = rows
+            page.update()
+
+        def import_now(e):
+            ok, msg, cnt, cols = import_fixed_excel(r"C:\\program_tax\\tax_address.xlsx")
+            status.value = ("✅ " if ok else "❌ ") + msg
+            status.color = ft.colors.GREEN_700 if ok else ft.colors.RED_700
+            if ok and cols:
+                # Update current columns to what we saw in file
+                nonlocal current_columns
+                current_columns = cols
+            refresh_grid()
+
+        def map_withholder_fields(item: dict) -> dict:
+            # Try to map likely columns to withholder fields
+            def first_nonempty(keys: list[str]) -> str:
+                for k in keys:
+                    if k in item and item[k] not in (None, ""):
+                        return str(item[k])
+                return ""
+            # Prefer exact field names from spec
+            name = first_nonempty(["name_tax", "withholder_name", "name", "company_name", "company", "ผู้หักภาษี", "ชื่อผู้หักภาษี"])
+            address = first_nonempty(["name_tax_address", "withholder_address", "address", "ที่อยู่", "ที่อยู่ผู้หักภาษี"])    
+            tax_id_raw = first_nonempty(["name_tax_id_card", "withholder_tax_id", "tax_id", "เลขประจำตัวผู้เสียภาษี", "taxid"])
+            tax_id = ''.join([ch for ch in tax_id_raw if ch.isdigit()])
+            return {
+                "withholder_name": name,
+                "withholder_address": address,
+                "withholder_tax_id": tax_id[:13] if tax_id else "",
+            }
+
+        def send_selected_to_crystal(e):
+            # Collect first selected row
+            selected_indices = [i for i, sel in row_selection.items() if sel]
+            if not selected_indices:
+                status.value = "❌ กรุณาเลือกรายการ"
+                status.color = ft.colors.RED_700
+                page.update(); return
+            idx0 = selected_indices[0]
+            if idx0 < 0 or idx0 >= len(data_items):
+                status.value = "❌ รายการไม่ถูกต้อง"
+                status.color = ft.colors.RED_700
+                page.update(); return
+            payload = map_withholder_fields(data_items[idx0])
+            nonlocal pending_withholder_import_data
+            pending_withholder_import_data = payload
+            # Switch to crystal report tab
+            try:
+                nav_rail.selected_index = 6
+                handle_nav_change(6)
+                status.value = "✅ ส่งข้อมูลไปยัง Crystal Report แล้ว"
+                status.color = ft.colors.GREEN_700
+                page.update()
+            except Exception as ex:
+                status.value = f"❌ ไม่สามารถเปิดแท็บ Crystal Report: {ex}"
+                status.color = ft.colors.RED_700
+                page.update()
+
+        # Initial load
+        ensure_table()
+        refresh_grid()
+
+        def clear_all_data(e):
+            conn = get_conn()
+            if not conn:
+                status.value = "❌ เชื่อมต่อฐานข้อมูลไม่สำเร็จ"
+                status.color = ft.colors.RED_700
+                page.update(); return
+            try:
+                cur = conn.cursor()
+                cur.execute(f"TRUNCATE TABLE {TABLE_NAME}")
+                conn.commit()
+                status.value = "✅ ลบข้อมูลทั้งหมดแล้ว"
+                status.color = ft.colors.GREEN_700
+                refresh_grid()
+            except Exception as ex:
+                conn.rollback()
+                status.value = f"❌ ลบข้อมูลไม่สำเร็จ: {ex}"
+                status.color = ft.colors.RED_700
+                page.update()
+            finally:
+                try:
+                    cur.close(); conn.close()
+                except Exception:
+                    pass
+
+        return ft.Container(
+            content=ft.Column([
+                ft.Text("นำเข้าผู้หักภาษีจาก Excel", size=22, weight=ft.FontWeight.BOLD),
+                info_text,
+                ft.Row([
+                    ft.ElevatedButton("นำเข้าจาก tax_address.xlsx", icon=ft.icons.FILE_UPLOAD, on_click=import_now),
+                    ft.ElevatedButton("รีเฟรช", icon=ft.icons.REFRESH, on_click=lambda e: refresh_grid()),
+                    ft.ElevatedButton("ล้างข้อมูล", icon=ft.icons.DELETE, on_click=clear_all_data,
+                                      style=ft.ButtonStyle(bgcolor=ft.colors.RED_700, color=ft.colors.WHITE)),
+                    ft.ElevatedButton("นำข้อมูลไปเติมใน Crystal Report", icon=ft.icons.ARROW_FORWARD, on_click=send_selected_to_crystal,
+                                      style=ft.ButtonStyle(bgcolor=ft.colors.GREEN_700, color=ft.colors.WHITE)),
+                ], spacing=10, wrap=True),
+                status,
+                ft.Container(
+                    content=ft.Column([data_table], scroll=ft.ScrollMode.AUTO),
+                    height=420, padding=10, bgcolor=ft.colors.GREY_50, border_radius=8
+                ),
+                ft.Row([
+                    ft.ElevatedButton(
+                        "เลือกรายการเพื่อกรอกลง pdf ไป",
+                        icon=ft.icons.CHECK_CIRCLE,
+                        on_click=send_selected_to_crystal,
+                        style=ft.ButtonStyle(bgcolor=ft.colors.BLUE_700, color=ft.colors.WHITE)
+                    )
+                ], alignment=ft.MainAxisAlignment.START)
+            ], spacing=12),
+            padding=20,
+        )
+
     # Export Excel function
     def export_excel_clicked(e):
         try:
@@ -2571,8 +2822,10 @@ def main(page: ft.Page):
                     withholdee_name.value, withholdee_address.value, withholdee_tax_id.value, withholdee_type.value or "บุคคล",
                     certificate_book_no.value, certificate_no.value, 
                     int(sequence_in_form.value) if sequence_in_form.value else None, form_type.value,
-                    float(income_1_amount.value or 0), float(income_1_tax.value or 0),
-                    float(income_2_amount.value or 0), float(income_2_tax.value or 0),
+                    float(income_1_amount.value) if (income_1_amount.value or "").strip() else 0.0,
+                    float(income_1_tax.value) if (income_1_tax.value or "").strip() else 0.0,
+                    float(income_2_amount.value) if (income_2_amount.value or "").strip() else 0.0,
+                    float(income_2_tax.value) if (income_2_tax.value or "").strip() else 0.0,
                     float(income_3_amount.value or 0), float(income_3_tax.value or 0),
                     float(income_4a_amount.value or 0), float(income_4a_tax.value or 0),
                     float(income_4b_amount.value or 0), float(income_4b_tax.value or 0),
@@ -2581,8 +2834,9 @@ def main(page: ft.Page):
                     float(income_6_amount.value or 0), float(income_6_tax.value or 0), income_6_description.value,
                     float(total_income_display.value.replace(',', '') or 0), 
                     float(total_tax_display.value.replace(',', '') or 0), total_tax_text.value,
-                    float(provident_fund.value or 0), float(social_security_fund.value or 0), 
-                    float(retirement_mutual_fund.value or 0),
+                    float(provident_fund.value) if (provident_fund.value or "").strip() else 0.0,
+                    float(social_security_fund.value) if (social_security_fund.value or "").strip() else 0.0,
+                    float(retirement_mutual_fund.value) if (retirement_mutual_fund.value or "").strip() else 0.0,
                     issue_type.value, issue_type_other.value, issue_date.value or None, 
                     signatory_name.value, company_seal.value
                 )
@@ -3281,8 +3535,10 @@ def main(page: ft.Page):
                     withholdee_name.value, withholdee_address.value, withholdee_tax_id.value, withholdee_type.value or "บุคคล",
                     certificate_book_no.value, certificate_no.value, 
                     int(sequence_in_form.value) if sequence_in_form.value else None, form_type.value,
-                    float(income_1_amount.value or 0), float(income_1_tax.value or 0),
-                    float(income_2_amount.value or 0), float(income_2_tax.value or 0),
+                    float(income_1_amount.value) if (income_1_amount.value or "").strip() else 0.0,
+                    float(income_1_tax.value) if (income_1_tax.value or "").strip() else 0.0,
+                    float(income_2_amount.value) if (income_2_amount.value or "").strip() else 0.0,
+                    float(income_2_tax.value) if (income_2_tax.value or "").strip() else 0.0,
                     float(income_3_amount.value or 0), float(income_3_tax.value or 0),
                     float(income_4a_amount.value or 0), float(income_4a_tax.value or 0),
                     float(income_4b_amount.value or 0), float(income_4b_tax.value or 0),
@@ -3291,8 +3547,9 @@ def main(page: ft.Page):
                     float(income_6_amount.value or 0), float(income_6_tax.value or 0), income_6_description.value,
                     float(total_income_display.value.replace(',', '') or 0), 
                     float(total_tax_display.value.replace(',', '') or 0), total_tax_text.value,
-                    float(provident_fund.value or 0), float(social_security_fund.value or 0), 
-                    float(retirement_mutual_fund.value or 0),
+                    float(provident_fund.value) if (provident_fund.value or "").strip() else 0.0,
+                    float(social_security_fund.value) if (social_security_fund.value or "").strip() else 0.0,
+                    float(retirement_mutual_fund.value) if (retirement_mutual_fund.value or "").strip() else 0.0,
                     issue_type.value, issue_type_other.value, issue_date.value or None, 
                     signatory_name.value, company_seal.value
                 )
@@ -3849,8 +4106,10 @@ def main(page: ft.Page):
                     withholdee_name.value, withholdee_address.value, withholdee_tax_id.value, withholdee_type.value or "บุคคล",
                     certificate_book_no.value, certificate_no.value, 
                     int(sequence_in_form.value) if sequence_in_form.value else None, form_type.value,
-                    float(income_1_amount.value or 0), float(income_1_tax.value or 0),
-                    float(income_2_amount.value or 0), float(income_2_tax.value or 0),
+                    float(income_1_amount.value) if (income_1_amount.value or "").strip() else 0.0,
+                    float(income_1_tax.value) if (income_1_tax.value or "").strip() else 0.0,
+                    float(income_2_amount.value) if (income_2_amount.value or "").strip() else 0.0,
+                    float(income_2_tax.value) if (income_2_tax.value or "").strip() else 0.0,
                     float(income_3_amount.value or 0), float(income_3_tax.value or 0),
                     float(income_4a_amount.value or 0), float(income_4a_tax.value or 0),
                     float(income_4b_amount.value or 0), float(income_4b_tax.value or 0),
@@ -3859,8 +4118,9 @@ def main(page: ft.Page):
                     float(income_6_amount.value or 0), float(income_6_tax.value or 0), income_6_description.value,
                     float(total_income_display.value.replace(',', '') or 0), 
                     float(total_tax_display.value.replace(',', '') or 0), total_tax_text.value,
-                    float(provident_fund.value or 0), float(social_security_fund.value or 0), 
-                    float(retirement_mutual_fund.value or 0),
+                    float(provident_fund.value) if (provident_fund.value or "").strip() else 0.0,
+                    float(social_security_fund.value) if (social_security_fund.value or "").strip() else 0.0,
+                    float(retirement_mutual_fund.value) if (retirement_mutual_fund.value or "").strip() else 0.0,
                     issue_type.value, issue_type_other.value, issue_date.value or None, 
                     signatory_name.value, company_seal.value
                 )
@@ -4620,8 +4880,10 @@ def main(page: ft.Page):
                     withholdee_name.value, withholdee_address.value, withholdee_tax_id.value, withholdee_type.value or "บุคคล",
                     certificate_book_no.value, certificate_no.value, 
                     int(sequence_in_form.value) if sequence_in_form.value else None, form_type.value,
-                    float(income_1_amount.value or 0), float(income_1_tax.value or 0),
-                    float(income_2_amount.value or 0), float(income_2_tax.value or 0),
+                    float(income_1_amount.value) if (income_1_amount.value or "").strip() else 0.0,
+                    float(income_1_tax.value) if (income_1_tax.value or "").strip() else 0.0,
+                    float(income_2_amount.value) if (income_2_amount.value or "").strip() else 0.0,
+                    float(income_2_tax.value) if (income_2_tax.value or "").strip() else 0.0,
                     float(income_3_amount.value or 0), float(income_3_tax.value or 0),
                     float(income_4a_amount.value or 0), float(income_4a_tax.value or 0),
                     float(income_4b_amount.value or 0), float(income_4b_tax.value or 0),
@@ -4630,8 +4892,9 @@ def main(page: ft.Page):
                     float(income_6_amount.value or 0), float(income_6_tax.value or 0), income_6_description.value,
                     float(total_income_display.value.replace(',', '') or 0), 
                     float(total_tax_display.value.replace(',', '') or 0), total_tax_text.value,
-                    float(provident_fund.value or 0), float(social_security_fund.value or 0), 
-                    float(retirement_mutual_fund.value or 0),
+                    float(provident_fund.value) if (provident_fund.value or "").strip() else 0.0,
+                    float(social_security_fund.value) if (social_security_fund.value or "").strip() else 0.0,
+                    float(retirement_mutual_fund.value) if (retirement_mutual_fund.value or "").strip() else 0.0,
                     issue_type.value, issue_type_other.value, issue_date.value or None, 
                     signatory_name.value, company_seal.value
                 )
@@ -6293,13 +6556,13 @@ def main(page: ft.Page):
                     elif field_id == "form_type":
                         field_value = form_type.value or ""
                     elif field_id == "income_1_amount":
-                        field_value = str(income_1_amount.value or "0")
+                        field_value = str(income_1_amount.value or "").strip()
                     elif field_id == "income_1_tax":
-                        field_value = str(income_1_tax.value or "0")
+                        field_value = str(income_1_tax.value or "").strip()
                     elif field_id == "income_2_amount":
-                        field_value = str(income_2_amount.value or "0")
+                        field_value = str(income_2_amount.value or "").strip()
                     elif field_id == "income_2_tax":
-                        field_value = str(income_2_tax.value or "0")
+                        field_value = str(income_2_tax.value or "").strip()
                     elif field_id == "total_income":
                         field_value = total_income_display.value or "0"
                     elif field_id == "total_tax":
@@ -6307,11 +6570,11 @@ def main(page: ft.Page):
                     elif field_id == "total_tax_text":
                         field_value = total_tax_text.value or ""
                     elif field_id == "provident_fund":
-                        field_value = str(provident_fund.value or "0")
+                        field_value = str(provident_fund.value or "").strip()
                     elif field_id == "social_security_fund":
-                        field_value = str(social_security_fund.value or "0")
+                        field_value = str(social_security_fund.value or "").strip()
                     elif field_id == "retirement_mutual_fund":
-                        field_value = str(retirement_mutual_fund.value or "0")
+                        field_value = str(retirement_mutual_fund.value or "").strip()
                     elif field_id == "issue_date":
                         field_value = issue_date.value or ""
                     elif field_id == "signatory_name":
@@ -6639,8 +6902,12 @@ def main(page: ft.Page):
                 
                 # Calculate totals
                 try:
-                    total_income = float(income_1_amount.value or 0) + float(income_2_amount.value or 0)
-                    total_tax = float(income_1_tax.value or 0) + float(income_2_tax.value or 0)
+                    v1 = float(income_1_amount.value) if (income_1_amount.value or "").strip() else 0.0
+                    v2 = float(income_2_amount.value) if (income_2_amount.value or "").strip() else 0.0
+                    t1 = float(income_1_tax.value) if (income_1_tax.value or "").strip() else 0.0
+                    t2 = float(income_2_tax.value) if (income_2_tax.value or "").strip() else 0.0
+                    total_income = v1 + v2
+                    total_tax = t1 + t2
                     total_income_display.value = f"{total_income:,.2f}"
                     total_tax_display.value = f"{total_tax:,.2f}"
                 except:
@@ -6881,16 +7148,44 @@ def main(page: ft.Page):
                             issue_date.value = str(get_value_from_mapping('issue_date'))
                             signatory_name.value = str(get_value_from_mapping('signatory_name'))
                             company_seal.value = False
+                            # If there is a pending withholder payload from the import tab, apply it now
+                            try:
+                                nonlocal pending_withholder_import_data
+                                if pending_withholder_import_data:
+                                    payload = pending_withholder_import_data
+                                    if payload.get('withholder_name'):
+                                        withholder_name.value = payload['withholder_name']
+                                    if payload.get('withholder_address'):
+                                        withholder_address.value = payload['withholder_address']
+                                    if payload.get('withholder_tax_id'):
+                                        withholder_tax_id.value = payload['withholder_tax_id']
+                                    pending_withholder_import_data = None
+                            except Exception:
+                                pass
                             
                             # Calculate totals
                             try:
-                                total_income = float(income_1_amount.value or 0) + float(income_2_amount.value or 0)
-                                total_tax = float(income_1_tax.value or 0) + float(income_2_tax.value or 0)
+                                v1 = float(income_1_amount.value) if (income_1_amount.value or "").strip() else 0.0
+                                v2 = float(income_2_amount.value) if (income_2_amount.value or "").strip() else 0.0
+                                t1 = float(income_1_tax.value) if (income_1_tax.value or "").strip() else 0.0
+                                t2 = float(income_2_tax.value) if (income_2_tax.value or "").strip() else 0.0
+                                total_income = v1 + v2
+                                total_tax = t1 + t2
                                 total_income_display.value = f"{total_income:,.2f}"
                                 total_tax_display.value = f"{total_tax:,.2f}"
                             except:
                                 total_income_display.value = "0.00"
                                 total_tax_display.value = "0.00"
+                            # Blank out zeros for numeric fields
+                            try:
+                                zero_like = {"0", "0.0", "0.00"}
+                                for field in [income_1_amount, income_1_tax, income_2_amount, income_2_tax,
+                                              provident_fund, social_security_fund, retirement_mutual_fund]:
+                                    txt = (field.value or "").replace(",", "").strip()
+                                    if txt in zero_like:
+                                        field.value = ""
+                            except Exception:
+                                pass
                             
                             status_text.value = f"✅ โหลดข้อมูลรายการแรกจาก {table_to_use} เรียบร้อย"
                             status_text.color = ft.colors.GREEN_700
@@ -6988,15 +7283,15 @@ def main(page: ft.Page):
         )
         
         # Income fields
-        income_1_amount = ft.TextField(label="เงินเดือน", width=200, keyboard_type=ft.KeyboardType.NUMBER, value="0")
-        income_1_tax = ft.TextField(label="ภาษี", width=150, keyboard_type=ft.KeyboardType.NUMBER, value="0")
-        income_2_amount = ft.TextField(label="ค่าธรรมเนียม", width=200, keyboard_type=ft.KeyboardType.NUMBER, value="0")
-        income_2_tax = ft.TextField(label="ภาษี", width=150, keyboard_type=ft.KeyboardType.NUMBER, value="0")
+        income_1_amount = ft.TextField(label="เงินเดือน", width=200, keyboard_type=ft.KeyboardType.NUMBER, value="")
+        income_1_tax = ft.TextField(label="ภาษี", width=150, keyboard_type=ft.KeyboardType.NUMBER, value="")
+        income_2_amount = ft.TextField(label="ค่าธรรมเนียม", width=200, keyboard_type=ft.KeyboardType.NUMBER, value="")
+        income_2_tax = ft.TextField(label="ภาษี", width=150, keyboard_type=ft.KeyboardType.NUMBER, value="")
         
         # Fund fields
-        provident_fund = ft.TextField(label="กบข.", width=150, keyboard_type=ft.KeyboardType.NUMBER, value="0")
-        social_security_fund = ft.TextField(label="ประกันสังคม", width=150, keyboard_type=ft.KeyboardType.NUMBER, value="0")
-        retirement_mutual_fund = ft.TextField(label="กองทุนเลี้ยงชีพ", width=150, keyboard_type=ft.KeyboardType.NUMBER, value="0")
+        provident_fund = ft.TextField(label="กบข.", width=150, keyboard_type=ft.KeyboardType.NUMBER, value="")
+        social_security_fund = ft.TextField(label="ประกันสังคม", width=150, keyboard_type=ft.KeyboardType.NUMBER, value="")
+        retirement_mutual_fund = ft.TextField(label="กองทุนเลี้ยงชีพ", width=150, keyboard_type=ft.KeyboardType.NUMBER, value="")
         
         # Issue fields
         issue_type = ft.Dropdown(
@@ -7060,8 +7355,12 @@ def main(page: ft.Page):
         
         def calculate_totals():
             try:
-                total_income = float(income_1_amount.value or 0) + float(income_2_amount.value or 0)
-                total_tax = float(income_1_tax.value or 0) + float(income_2_tax.value or 0)
+                v1 = float(income_1_amount.value) if (income_1_amount.value or "").strip() else 0.0
+                v2 = float(income_2_amount.value) if (income_2_amount.value or "").strip() else 0.0
+                t1 = float(income_1_tax.value) if (income_1_tax.value or "").strip() else 0.0
+                t2 = float(income_2_tax.value) if (income_2_tax.value or "").strip() else 0.0
+                total_income = v1 + v2
+                total_tax = t1 + t2
                 
                 total_income_display.value = f"{total_income:,.2f}"
                 total_tax_display.value = f"{total_tax:,.2f}"
@@ -7073,6 +7372,22 @@ def main(page: ft.Page):
         for field in [income_1_amount, income_1_tax, income_2_amount, income_2_tax]:
             field.on_change = lambda e: calculate_totals()
         
+        # Helper: blank out zeros shown in numeric text fields
+        def blank_out_zero_fields():
+            zero_like = {"0", "0.0", "0.00"}
+            for field in [income_1_amount, income_1_tax, income_2_amount, income_2_tax,
+                          provident_fund, social_security_fund, retirement_mutual_fund]:
+                try:
+                    txt = (field.value or "").replace(",", "").strip()
+                    if txt in zero_like:
+                        field.value = ""
+                except Exception:
+                    continue
+            try:
+                page.update()
+            except Exception:
+                pass
+
         # Auto-load first record and coordinates on startup
         try:
             auto_fill_first_record(None)  # Pass None since we don't need the event
@@ -7080,6 +7395,8 @@ def main(page: ft.Page):
             print(f"⚠️ Could not auto-load first record on startup: {e}")
             # Just load coordinates if record loading fails
             load_coordinates_from_database()
+        # Ensure zero values are shown as blank on initial load
+        blank_out_zero_fields()
         
         def save_form(e):
             nonlocal last_certificate_id
@@ -7096,13 +7413,16 @@ def main(page: ft.Page):
                     withholdee_name.value, withholdee_address.value, withholdee_tax_id.value, withholdee_type.value or "บุคคล",
                     certificate_book_no.value, certificate_no.value, 
                     int(sequence_in_form.value) if sequence_in_form.value else None, form_type.value,
-                    float(income_1_amount.value or 0), float(income_1_tax.value or 0),
-                    float(income_2_amount.value or 0), float(income_2_tax.value or 0),
+                    float(income_1_amount.value) if (income_1_amount.value or "").strip() else 0.0,
+                    float(income_1_tax.value) if (income_1_tax.value or "").strip() else 0.0,
+                    float(income_2_amount.value) if (income_2_amount.value or "").strip() else 0.0,
+                    float(income_2_tax.value) if (income_2_tax.value or "").strip() else 0.0,
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None,  # Other income fields
                     float(total_income_display.value.replace(',', '') or 0), 
                     float(total_tax_display.value.replace(',', '') or 0), total_tax_text.value,
-                    float(provident_fund.value or 0), float(social_security_fund.value or 0), 
-                    float(retirement_mutual_fund.value or 0),
+                    float(provident_fund.value) if (provident_fund.value or "").strip() else 0.0,
+                    float(social_security_fund.value) if (social_security_fund.value or "").strip() else 0.0,
+                    float(retirement_mutual_fund.value) if (retirement_mutual_fund.value or "").strip() else 0.0,
                     issue_type.value, None, issue_date.value or None, 
                     signatory_name.value, company_seal.value
                 )
@@ -7315,6 +7635,28 @@ def main(page: ft.Page):
             tooltip="บันทึกข้อมูลก่อนเพื่อสร้าง PDF แบบ Crystal Reports"
         )
         
+        # Apply withholder payload from import tab
+        def apply_withholder_payload(e):
+            nonlocal pending_withholder_import_data
+            try:
+                if not pending_withholder_import_data:
+                    status_text.value = "❌ ไม่มีข้อมูลผู้หักภาษีที่เลือกจากแท็บนำเข้า"
+                    status_text.color = ft.colors.RED_700
+                    page.update();
+                    return
+                payload = pending_withholder_import_data or {}
+                withholder_name.value = payload.get('withholder_name', '') or ''
+                withholder_address.value = payload.get('withholder_address', '') or ''
+                withholder_tax_id.value = payload.get('withholder_tax_id', '') or ''
+                pending_withholder_import_data = None
+                status_text.value = "✅ เติมข้อมูลผู้มีหน้าที่หักภาษีจากแท็บนำเข้าแล้ว"
+                status_text.color = ft.colors.GREEN_700
+                page.update()
+            except Exception as ex:
+                status_text.value = f"❌ เติมข้อมูลไม่สำเร็จ: {ex}"
+                status_text.color = ft.colors.RED_700
+                page.update()
+        
         return ft.Container(
             content=ft.Column([
                 # Header with Crystal Reports info and PDF preview
@@ -7385,6 +7727,9 @@ def main(page: ft.Page):
                     ft.ElevatedButton("⬇️ ดึงข้อมูลที่เลือก", on_click=lambda e: auto_fill_from_selected_dashboard(),
                                     style=ft.ButtonStyle(bgcolor=ft.colors.BLUE_700, color=ft.colors.WHITE),
                                     tooltip="ดึงข้อมูลจากแถวที่เลือกในหน้าแรกมาใส่ผู้ถูกหักภาษี"),
+                    ft.ElevatedButton("📥 ดึงข้อมูลผู้หักภาษี", on_click=apply_withholder_payload,
+                                    style=ft.ButtonStyle(bgcolor=ft.colors.TEAL_700, color=ft.colors.WHITE),
+                                    tooltip="นำข้อมูลผู้หักภาษีจากแท็บ\n'นำเข้าผู้หักภาษีจาก excel' มาเติม"),
                     ft.ElevatedButton("🚀 โหลดรายการแรก", on_click=auto_fill_first_record,
                                     style=ft.ButtonStyle(bgcolor=ft.colors.PINK_700, color=ft.colors.WHITE)),
                     ft.ElevatedButton("🗑️ เคลียร์ฟอร์ม", on_click=clear_form,
@@ -7711,6 +8056,11 @@ def main(page: ft.Page):
                 label="นำเข้าจาก Excel",
             ),
             ft.NavigationRailDestination(
+                icon=ft.Icons.FILE_UPLOAD,
+                selected_icon=ft.Icons.FILE_UPLOAD,
+                label="นำเข้าผู้หักภาษีจาก excel",
+            ),
+            ft.NavigationRailDestination(
                 icon=ft.Icons.BACKUP,
                 selected_icon=ft.Icons.BACKUP,
                 label="สำรองข้อมูล",
@@ -7743,6 +8093,8 @@ def main(page: ft.Page):
         elif selected_index == 7:
             content_area.content = create_import_excel_tab()
         elif selected_index == 8:
+            content_area.content = create_import_withholder_excel_tab()
+        elif selected_index == 9:
             content_area.content = create_backup_tab()
         page.update()
     
