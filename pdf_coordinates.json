@@ -45,32 +45,32 @@
     "size": 10
   },
   "income_1_amount": {
-    "x": 420,
+    "x": 820,
     "y": 535,
     "size": 10
   },
   "income_1_tax": {
-    "x": 510,
+    "x": 810,
     "y": 535,
     "size": 10
   },
   "income_2_amount": {
-    "x": 420,
+    "x": 820,
     "y": 520,
     "size": 10
   },
   "income_2_tax": {
-    "x": 510,
+    "x": 810,
     "y": 520,
     "size": 10
   },
   "total_income": {
-    "x": 420,
+    "x": 820,
     "y": 180,
     "size": 12
   },
   "total_tax": {
-    "x": 500,
+    "x": 830,
     "y": 180,
     "size": 12
   },
@@ -157,6 +157,306 @@
   "card_number_10": {
     "x": 550,
     "y": 680,
+    "size": 10
+  },
+  "salary_pos_1": {
+    "x": 435,
+    "y": 535,
+    "size": 10
+  },
+  "salary_pos_2": {
+    "x": 440,
+    "y": 535,
+    "size": 10
+  },
+  "salary_pos_3": {
+    "x": 445,
+    "y": 535,
+    "size": 10
+  },
+  "salary_pos_4": {
+    "x": 450,
+    "y": 535,
+    "size": 10
+  },
+  "salary_pos_5": {
+    "x": 455,
+    "y": 535,
+    "size": 10
+  },
+  "salary_pos_6": {
+    "x": 460,
+    "y": 535,
+    "size": 10
+  },
+  "salary_pos_7": {
+    "x": 465,
+    "y": 535,
+    "size": 10
+  },
+  "salary_pos_8": {
+    "x": 470,
+    "y": 535,
+    "size": 10
+  },
+  "salary_pos_9": {
+    "x": 480,
+    "y": 535,
+    "size": 10
+  },
+  "salary_pos_10": {
+    "x": 485,
+    "y": 535,
+    "size": 10
+  },
+  "tax_pos_1": {
+    "x": 515,
+    "y": 535,
+    "size": 10
+  },
+  "tax_pos_2": {
+    "x": 520,
+    "y": 535,
+    "size": 10
+  },
+  "tax_pos_3": {
+    "x": 525,
+    "y": 535,
+    "size": 10
+  },
+  "tax_pos_4": {
+    "x": 530,
+    "y": 535,
+    "size": 10
+  },
+  "tax_pos_5": {
+    "x": 535,
+    "y": 535,
+    "size": 10
+  },
+  "tax_pos_6": {
+    "x": 540,
+    "y": 535,
+    "size": 10
+  },
+  "tax_pos_7": {
+    "x": 550,
+    "y": 535,
+    "size": 10
+  },
+  "tax_pos_8": {
+    "x": 555,
+    "y": 535,
+    "size": 10
+  },
+  "fee_pos_1": {
+    "x": 435,
+    "y": 520,
+    "size": 10
+  },
+  "fee_pos_2": {
+    "x": 440,
+    "y": 520,
+    "size": 10
+  },
+  "fee_pos_3": {
+    "x": 445,
+    "y": 520,
+    "size": 10
+  },
+  "fee_pos_4": {
+    "x": 450,
+    "y": 520,
+    "size": 10
+  },
+  "fee_pos_5": {
+    "x": 455,
+    "y": 520,
+    "size": 10
+  },
+  "fee_pos_6": {
+    "x": 460,
+    "y": 520,
+    "size": 10
+  },
+  "fee_pos_7": {
+    "x": 465,
+    "y": 520,
+    "size": 10
+  },
+  "fee_pos_8": {
+    "x": 470,
+    "y": 520,
+    "size": 10
+  },
+  "fee_pos_9": {
+    "x": 480,
+    "y": 520,
+    "size": 10
+  },
+  "fee_pos_10": {
+    "x": 485,
+    "y": 520,
+    "size": 10
+  },
+  "fee_tax_pos_1": {
+    "x": 515,
+    "y": 520,
+    "size": 10
+  },
+  "fee_tax_pos_2": {
+    "x": 520,
+    "y": 520,
+    "size": 10
+  },
+  "fee_tax_pos_3": {
+    "x": 525,
+    "y": 520,
+    "size": 10
+  },
+  "fee_tax_pos_4": {
+    "x": 530,
+    "y": 520,
+    "size": 10
+  },
+  "fee_tax_pos_5": {
+    "x": 535,
+    "y": 520,
+    "size": 10
+  },
+  "fee_tax_pos_6": {
+    "x": 540,
+    "y": 520,
+    "size": 10
+  },
+  "fee_tax_pos_7": {
+    "x": 550,
+    "y": 520,
+    "size": 10
+  },
+  "fee_tax_pos_8": {
+    "x": 555,
+    "y": 520,
+    "size": 10
+  },
+  "total_income_pos_1": {
+    "x": 435,
+    "y": 180,
+    "size": 10
+  },
+  "total_income_pos_2": {
+    "x": 440,
+    "y": 180,
+    "size": 10
+  },
+  "total_income_pos_3": {
+    "x": 445,
+    "y": 180,
+    "size": 10
+  },
+  "total_income_pos_4": {
+    "x": 450,
+    "y": 180,
+    "size": 10
+  },
+  "total_income_pos_5": {
+    "x": 455,
+    "y": 180,
+    "size": 10
+  },
+  "total_income_pos_6": {
+    "x": 460,
+    "y": 180,
+    "size": 10
+  },
+  "total_income_pos_7": {
+    "x": 465,
+    "y": 180,
+    "size": 10
+  },
+  "total_income_pos_8": {
+    "x": 470,
+    "y": 180,
+    "size": 10
+  },
+  "total_income_pos_9": {
+    "x": 485,
+    "y": 180,
+    "size": 10
+  },
+  "total_income_pos_10": {
+    "x": 480,
+    "y": 180,
+    "size": 10
+  },
+  "total_tax_pos_1": {
+    "x": 515,
+    "y": 180,
+    "size": 10
+  },
+  "total_tax_pos_2": {
+    "x": 520,
+    "y": 180,
+    "size": 10
+  },
+  "total_tax_pos_3": {
+    "x": 525,
+    "y": 180,
+    "size": 10
+  },
+  "total_tax_pos_4": {
+    "x": 530,
+    "y": 180,
+    "size": 10
+  },
+  "total_tax_pos_5": {
+    "x": 535,
+    "y": 180,
+    "size": 10
+  },
+  "total_tax_pos_6": {
+    "x": 540,
+    "y": 180,
+    "size": 10
+  },
+  "total_tax_pos_7": {
+    "x": 550,
+    "y": 180,
+    "size": 10
+  },
+  "total_tax_pos_8": {
+    "x": 555,
+    "y": 180,
+    "size": 10
+  },
+  "dot_1": {
+    "x": 477,
+    "y": 535,
+    "size": 10
+  },
+  "dot_2": {
+    "x": 547,
+    "y": 535,
+    "size": 10
+  },
+  "dot_3": {
+    "x": 477,
+    "y": 520,
+    "size": 10
+  },
+  "dot_4": {
+    "x": 547,
+    "y": 520,
+    "size": 10
+  },
+  "dot_5": {
+    "x": 477,
+    "y": 180,
+    "size": 10
+  },
+  "dot_6": {
+    "x": 547,
+    "y": 180,
     "size": 10
   }
 }
