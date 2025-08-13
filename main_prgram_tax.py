@@ -1007,6 +1007,11 @@ class TransferRecordsApp:
         self.connection_string = "postgresql://neondb_owner:npg_BidDY7RA4zWX@ep-long-haze-a17mcg70-pooler.ap-southeast-1.aws.neon.tech/program_tax?sslmode=require&channel_binding=require"
         self.init_database()
         self.load_sample_data()
+        # Attempt to auto-sync from external source table on first run (limited to 12 records)
+        try:
+            self.sync_from_source_table_on_start(limit=12)
+        except Exception:
+            pass
         
     def get_connection(self):
         """Get PostgreSQL connection"""
@@ -1034,9 +1039,165 @@ class TransferRecordsApp:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        # Ensure optional columns exist
+        try:
+            cursor.execute("ALTER TABLE IF NOT EXISTS transfer_records ADD COLUMN IF NOT EXISTS remark TEXT;")
+        except Exception:
+            pass
         
         conn.commit()
         conn.close()
+
+    def _table_exists(self, cursor, table_name: str) -> bool:
+        try:
+            cursor.execute("SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name=%s)", (table_name,))
+            row = cursor.fetchone()
+            return bool(row and row[0])
+        except Exception:
+            return False
+
+    def sync_from_source_table_on_start(self, limit: int = 12):
+        """On app start: clear current transfer_records and pull up to 'limit' rows from 'tansfer_records' if it exists.
+        Fallback: if 'tansfer_records' does not exist or fails, do nothing.
+        """
+        conn = self.get_connection()
+        cur = conn.cursor()
+        try:
+            if not self._table_exists(cur, 'tansfer_records'):
+                return False, "no source table", 0
+
+            # Try to select basic columns; if fails, stop gracefully
+            try:
+                cur.execute(
+                    """
+                    SELECT name, surname, transfer_amount, transfer_date, id_card, address, percent, remark
+                    FROM tansfer_records
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                    """,
+                    (limit,)
+                )
+                rows = cur.fetchall()
+                has_remark = True
+            except Exception:
+                try:
+                    cur.execute(
+                        """
+                        SELECT name, surname, transfer_amount, transfer_date, id_card, address, percent
+                        FROM tansfer_records
+                        ORDER BY 1 DESC
+                        LIMIT %s
+                        """,
+                        (limit,)
+                    )
+                    rows = cur.fetchall()
+                    has_remark = False
+                except Exception:
+                    return False, "cannot read source table", 0
+
+            # Clear destination table
+            try:
+                cur.execute("TRUNCATE TABLE transfer_records RESTART IDENTITY;")
+            except Exception:
+                cur.execute("DELETE FROM transfer_records;")
+
+            # Ensure remark exists on dest
+            try:
+                cur.execute("ALTER TABLE IF NOT EXISTS transfer_records ADD COLUMN IF NOT EXISTS remark TEXT;")
+            except Exception:
+                pass
+
+            # Insert mapped rows
+            inserted = 0
+            for r in rows:
+                try:
+                    name, surname, transfer_amount, transfer_date, id_card, address, percent = r[:7]
+                    remark = (r[7] if has_remark and len(r) > 7 else None)
+                    total_amount = float(transfer_amount) * (1 + float(percent) / 100)
+                    fee = total_amount - float(transfer_amount)
+                    net_amount = float(transfer_amount)
+                    cur.execute(
+                        '''INSERT INTO transfer_records 
+                           (name, surname, transfer_amount, transfer_date, id_card, address, percent, total_amount, fee, net_amount, remark)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+                        (name, surname, float(transfer_amount), str(transfer_date), str(id_card), address, float(percent), total_amount, fee, net_amount, remark)
+                    )
+                    inserted += 1
+                except Exception:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    continue
+
+            conn.commit()
+            return True, "synced", inserted
+        finally:
+            try:
+                cur.close(); conn.close()
+            except Exception:
+                pass
+
+    def export_to_source_table(self, limit: int | None = None):
+        """Save current transfer_records to 'tansfer_records' table (create if needed)."""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        try:
+            # Ensure source table exists
+            cur.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS tansfer_records (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL,
+                    surname VARCHAR(255) NOT NULL,
+                    transfer_amount DECIMAL(15,2) NOT NULL,
+                    transfer_date VARCHAR(50) NOT NULL,
+                    id_card VARCHAR(20) NOT NULL,
+                    address TEXT NOT NULL,
+                    percent DECIMAL(5,2) NOT NULL,
+                    total_amount DECIMAL(15,2) NOT NULL,
+                    fee DECIMAL(15,2) NOT NULL,
+                    net_amount DECIMAL(15,2) NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    remark TEXT
+                )
+                '''
+            )
+
+            # Clear source
+            try:
+                cur.execute("TRUNCATE TABLE tansfer_records RESTART IDENTITY;")
+            except Exception:
+                cur.execute("DELETE FROM tansfer_records;")
+
+            # Read from dest
+            read_sql = '''SELECT name, surname, transfer_amount, transfer_date, id_card, address, percent, total_amount, fee, net_amount, created_at, remark FROM transfer_records ORDER BY created_at DESC'''
+            if limit and limit > 0:
+                read_sql += f" LIMIT {int(limit)}"
+            cur.execute(read_sql)
+            rows = cur.fetchall()
+
+            # Insert into source
+            for r in rows:
+                cur.execute(
+                    '''INSERT INTO tansfer_records 
+                       (name, surname, transfer_amount, transfer_date, id_card, address, percent, total_amount, fee, net_amount, created_at, remark)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+                    r
+                )
+            conn.commit()
+            return True, f"saved {len(rows)} rows"
+        except Exception as ex:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return False, str(ex)
+        finally:
+            try:
+                cur.close(); conn.close()
+            except Exception:
+                pass
         
     def load_sample_data(self):
         """Load sample data from PDF into database if table is empty"""
@@ -1079,12 +1240,29 @@ class TransferRecordsApp:
         conn = self.get_connection()
         cursor = conn.cursor()
         
-        cursor.execute('''
-            SELECT id, name, surname, transfer_amount, transfer_date, id_card, address, 
-                   percent, total_amount, fee, net_amount, created_at
-            FROM transfer_records
-            ORDER BY created_at DESC
-        ''')
+        try:
+            cursor.execute("""
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name='transfer_records' AND column_name='remark'
+            """)
+            has_remark = cursor.fetchone() is not None
+        except Exception:
+            has_remark = False
+
+        if has_remark:
+            cursor.execute('''
+                SELECT id, name, surname, transfer_amount, transfer_date, id_card, address, 
+                       percent, total_amount, fee, net_amount, created_at, remark
+                FROM transfer_records
+                ORDER BY created_at DESC
+            ''')
+        else:
+            cursor.execute('''
+                SELECT id, name, surname, transfer_amount, transfer_date, id_card, address, 
+                       percent, total_amount, fee, net_amount, created_at
+                FROM transfer_records
+                ORDER BY created_at DESC
+            ''')
         
         records = cursor.fetchall()
         conn.close()
@@ -1344,7 +1522,8 @@ class TransferRecordsApp:
                     'transfer_date': 'วันที่ (Date)',
                     'id_card': 'เลขบัตรประชาชน (ID Card)',
                     'address': 'ที่อยู่ (Address)',
-                    'percent': 'เปอร์เซ็นต์ (%)'
+                    'percent': 'เปอร์เซ็นต์ (%)',
+                    'remark': 'หมายเหตุ'
                 },
                 {
                     'name': 'name',
@@ -1353,7 +1532,8 @@ class TransferRecordsApp:
                     'transfer_date': 'transfer_date',
                     'id_card': 'id_card',
                     'address': 'address',
-                    'percent': 'percent'
+                    'percent': 'percent',
+                    'remark': 'remark'
                 }
             ]
 
@@ -1376,10 +1556,11 @@ class TransferRecordsApp:
                     id_card = str(row[used_map['id_card']]).strip()
                     address = str(row[used_map['address']]).strip()
                     percent = float(row[used_map['percent']] or 3.0)
+                    remark = str(row.get(used_map.get('remark', ''), '')).strip() if used_map.get('remark') in df.columns else None
                     total_amount = transfer_amount * (1 + percent / 100)
                     fee = total_amount - transfer_amount
                     net_amount = transfer_amount
-                    records.append((name, surname, transfer_amount, transfer_date, id_card, address, percent, total_amount, fee, net_amount))
+                    records.append((name, surname, transfer_amount, transfer_date, id_card, address, percent, total_amount, fee, net_amount, remark))
                 except Exception:
                     # skip bad row
                     continue
@@ -1389,10 +1570,15 @@ class TransferRecordsApp:
 
             conn = self.get_connection()
             cur = conn.cursor()
+            # Ensure remark column exists
+            try:
+                cur.execute("ALTER TABLE IF NOT EXISTS transfer_records ADD COLUMN IF NOT EXISTS remark TEXT;")
+            except Exception:
+                pass
             cur.executemany(
                 '''INSERT INTO transfer_records 
-                   (name, surname, transfer_amount, transfer_date, id_card, address, percent, total_amount, fee, net_amount)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+                   (name, surname, transfer_amount, transfer_date, id_card, address, percent, total_amount, fee, net_amount, remark)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
                 records
             )
             conn.commit()
@@ -1400,6 +1586,84 @@ class TransferRecordsApp:
             return True, f"นำเข้าสำเร็จ {len(records)} รายการ", len(records)
         except Exception as ex:
             return False, f"นำเข้าไม่สำเร็จ: {ex}", 0
+
+    def reset_from_excel(self, excel_path: str) -> Tuple[bool, str, int]:
+        try:
+            try:
+                df = pd.read_excel(excel_path, sheet_name='Transfer Records')
+            except Exception:
+                df = pd.read_excel(excel_path)
+
+            col_map_variants = [
+                {
+                    'name': 'ชื่อ (Name)',
+                    'surname': 'นามสกุล (Surname)',
+                    'transfer_amount': 'จำนวนโอน (Transfer)',
+                    'transfer_date': 'วันที่ (Date)',
+                    'id_card': 'เลขบัตรประชาชน (ID Card)',
+                    'address': 'ที่อยู่ (Address)',
+                    'percent': 'เปอร์เซ็นต์ (%)',
+                    'remark': 'หมายเหตุ'
+                },
+                {
+                    'name': 'name',
+                    'surname': 'surname',
+                    'transfer_amount': 'transfer_amount',
+                    'transfer_date': 'transfer_date',
+                    'id_card': 'id_card',
+                    'address': 'address',
+                    'percent': 'percent',
+                    'remark': 'remark'
+                }
+            ]
+
+            used_map = None
+            for cmap in col_map_variants:
+                if all(col in df.columns for col in [cmap['name'], cmap['surname'], cmap['transfer_amount'], cmap['transfer_date'], cmap['id_card'], cmap['address'], cmap['percent']]):
+                    used_map = cmap
+                    break
+            if used_map is None:
+                return False, 'โครงสร้างไฟล์ไม่ถูกต้อง (ไม่พบคอลัมน์ที่ต้องการ)', 0
+
+            records: List[tuple] = []
+            for _, row in df.iterrows():
+                try:
+                    name = str(row[used_map['name']]).strip()
+                    surname = str(row[used_map['surname']]).strip()
+                    transfer_amount = float(row[used_map['transfer_amount']] or 0)
+                    transfer_date = str(row[used_map['transfer_date']]).strip()
+                    id_card = str(row[used_map['id_card']]).strip()
+                    address = str(row[used_map['address']]).strip()
+                    percent = float(row[used_map['percent']] or 3.0)
+                    remark = str(row.get(used_map.get('remark', ''), '')).strip() if used_map.get('remark') in df.columns else None
+                    total_amount = transfer_amount * (1 + percent / 100)
+                    fee = total_amount - transfer_amount
+                    net_amount = transfer_amount
+                    records.append((name, surname, transfer_amount, transfer_date, id_card, address, percent, total_amount, fee, net_amount, remark))
+                except Exception:
+                    continue
+
+            conn = self.get_connection()
+            cur = conn.cursor()
+            try:
+                cur.execute("TRUNCATE TABLE transfer_records RESTART IDENTITY;")
+            except Exception:
+                cur.execute("DELETE FROM transfer_records;")
+            try:
+                cur.execute("ALTER TABLE IF NOT EXISTS transfer_records ADD COLUMN IF NOT EXISTS remark TEXT;")
+            except Exception:
+                pass
+            if records:
+                cur.executemany(
+                    '''INSERT INTO transfer_records 
+                       (name, surname, transfer_amount, transfer_date, id_card, address, percent, total_amount, fee, net_amount, remark)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+                    records
+                )
+            conn.commit(); conn.close()
+            return True, f"รีเซ็ตและนำเข้า {len(records)} รายการ", len(records)
+        except Exception as ex:
+            return False, f"รีเซ็ตไม่สำเร็จ: {ex}", 0
 
     # --- New: Backup to local SQLite (backup.db) ---
     def backup_to_sqlite(self, sqlite_path: str = 'backup.db') -> Tuple[bool, str, int]:
@@ -1449,7 +1713,7 @@ class TransferRecordsApp:
         except Exception as ex:
             return False, f"สำรองข้อมูลไม่สำเร็จ: {ex}", 0
     
-    def add_record(self, name, surname, transfer_amount, transfer_date, id_card, address, percent):
+    def add_record(self, name, surname, transfer_amount, transfer_date, id_card, address, percent, remark=None):
         """Add a new record to database"""
         try:
             conn = self.get_connection()
@@ -1460,11 +1724,15 @@ class TransferRecordsApp:
             fee = total_amount - transfer_amount
             net_amount = transfer_amount
             
+            try:
+                cursor.execute("ALTER TABLE IF NOT EXISTS transfer_records ADD COLUMN IF NOT EXISTS remark TEXT;")
+            except Exception:
+                pass
             cursor.execute('''
                 INSERT INTO transfer_records 
-                (name, surname, transfer_amount, transfer_date, id_card, address, percent, total_amount, fee, net_amount)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ''', (name, surname, transfer_amount, transfer_date, id_card, address, percent, total_amount, fee, net_amount))
+                (name, surname, transfer_amount, transfer_date, id_card, address, percent, total_amount, fee, net_amount, remark)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ''', (name, surname, transfer_amount, transfer_date, id_card, address, percent, total_amount, fee, net_amount, remark))
             
             conn.commit()
             conn.close()
@@ -1474,7 +1742,7 @@ class TransferRecordsApp:
         except Exception as e:
             return False, f"เกิดข้อผิดพลาด: {str(e)}"
     
-    def update_record(self, record_id, name, surname, transfer_amount, transfer_date, id_card, address, percent):
+    def update_record(self, record_id, name, surname, transfer_amount, transfer_date, id_card, address, percent, remark=None):
         """Update an existing record"""
         try:
             conn = self.get_connection()
@@ -1489,10 +1757,10 @@ class TransferRecordsApp:
                 UPDATE transfer_records 
                 SET name = %s, surname = %s, transfer_amount = %s, transfer_date = %s, 
                     id_card = %s, address = %s, percent = %s, total_amount = %s, 
-                    fee = %s, net_amount = %s
+                    fee = %s, net_amount = %s, remark = %s
                 WHERE id = %s
             ''', (name, surname, transfer_amount, transfer_date, id_card, address, 
-                  percent, total_amount, fee, net_amount, record_id))
+                  percent, total_amount, fee, net_amount, remark, record_id))
             
             conn.commit()
             conn.close()
@@ -1526,7 +1794,7 @@ class TransferRecordsApp:
             
             cursor.execute('''
                 SELECT id, name, surname, transfer_amount, transfer_date, id_card, address, 
-                       percent, total_amount, fee, net_amount
+                       percent, total_amount, fee, net_amount, remark
                 FROM transfer_records
                 WHERE id = %s
             ''', (record_id,))
@@ -1549,7 +1817,13 @@ def main(page: ft.Page):
     # Initialize app
     app = TransferRecordsApp()
     
-    # Get initial statistics
+    # On first load: auto-fill dashboard data from source table (limit 12)
+    try:
+        app.sync_from_source_table_on_start(limit=12)
+    except Exception:
+        pass
+
+    # Get initial statistics (after sync)
     stats = app.get_statistics()
     
     # Status text
@@ -1600,6 +1874,13 @@ def main(page: ft.Page):
         label="เปอร์เซ็นต์",
         hint_text="กรอกเปอร์เซ็นต์",
         width=200
+    )
+    
+    # Remark input (used in dashboard quick edit panel)
+    remark_input = ft.TextField(
+        label="หมายเหตุ",
+        hint_text="ระบุหมายเหตุ (ถ้ามี)",
+        width=300
     )
     
     record_id_input = ft.TextField(
@@ -1711,10 +1992,129 @@ def main(page: ft.Page):
     row_checkboxes = {}
     selected_transfer_id_for_pdf = None
 
+    def sync_transfer_remarks_from_excel_on_start():
+        """Load 'remark' values from Excel into Neon DB at app start.
+        Tries multiple common paths and handles absence gracefully.
+        Expected Excel columns: at least 'id' and 'remark'. Other columns are ignored.
+        """
+        try:
+            import pandas as pd
+            import psycopg2
+            # Candidate paths (handle typos and folder variants)
+            candidates = [
+                r"C:\\program_tax\\transfer_records_update.xlsx",
+                r"C:\\program_tax\\transfer_records_update.xslx",
+                r"C:\\program_tax\\transfer_record_update_xslx\\transfer_records_update.xlsx",
+                r"C:\\program_tax\\transfer_record_update_xslx\\transfer_records_update.xslx",
+            ]
+            excel_path = None
+            import os
+            for p in candidates:
+                if os.path.exists(p):
+                    excel_path = p
+                    break
+            if not excel_path:
+                return  # No file found → skip silently
+
+            # Read excel
+            try:
+                df = pd.read_excel(excel_path)
+            except Exception:
+                return
+            if df is None or df.empty:
+                return
+            # Normalize columns to str lower
+            df.columns = [str(c).strip() for c in df.columns]
+            cols = {c.lower(): c for c in df.columns}
+            if 'id' not in cols or 'remark' not in cols:
+                return  # cannot map without id/remark
+            id_col = cols['id']
+            remark_col = cols['remark']
+
+            # Prepare updates
+            updates = []
+            for _, row in df.iterrows():
+                rec_id = row.get(id_col)
+                remark_val = row.get(remark_col)
+                if rec_id is None:
+                    continue
+                # Only update when remark has a non-empty value
+                if remark_val is None or str(remark_val).strip() == "":
+                    continue
+                try:
+                    updates.append((str(remark_val), int(rec_id)))
+                except Exception:
+                    continue
+            if not updates:
+                return
+
+            # Update Neon DB
+            conn_str = "postgresql://neondb_owner:npg_BidDY7RA4zWX@ep-long-haze-a17mcg70-pooler.ap-southeast-1.aws.neon.tech/program_tax?sslmode=require&channel_binding=require"
+            with psycopg2.connect(conn_str) as conn:
+                with conn.cursor() as cur:
+                    # Ensure column exists
+                    cur.execute("ALTER TABLE IF NOT EXISTS transfer_records ADD COLUMN IF NOT EXISTS remark TEXT;")
+                    # Batch update
+                    for remark_val, rec_id in updates:
+                        try:
+                            cur.execute("UPDATE transfer_records SET remark=%s WHERE id=%s", (remark_val, rec_id))
+                        except Exception:
+                            try:
+                                conn.rollback()
+                            except Exception:
+                                pass
+                            continue
+                    conn.commit()
+        except Exception:
+            # Fail silently to not break app startup
+            pass
+
+    # Run remark sync before building grids
+    sync_transfer_remarks_from_excel_on_start()
+
     # Full data grid
     def create_full_data_grid():
-        nonlocal row_checkboxes
+        nonlocal row_checkboxes, selected_transfer_id_for_pdf
         records = app.get_all_records()
+
+        def update_remark(rec_id: int, new_value) -> bool:
+            try:
+                import psycopg2
+                conn_str = "postgresql://neondb_owner:npg_BidDY7RA4zWX@ep-long-haze-a17mcg70-pooler.ap-southeast-1.aws.neon.tech/program_tax?sslmode=require&channel_binding=require"
+                with psycopg2.connect(conn_str) as conn:
+                    with conn.cursor() as cur:
+                        try:
+                            cur.execute("ALTER TABLE IF NOT EXISTS transfer_records ADD COLUMN IF NOT EXISTS remark TEXT;")
+                            cur.execute("UPDATE transfer_records SET remark=%s WHERE id=%s", (new_value, rec_id))
+                            conn.commit()
+                            return True
+                        except Exception:
+                            try:
+                                conn.rollback()
+                            except Exception:
+                                pass
+                            return False
+            except Exception:
+                return False
+
+        def fetch_remark_by_id(rec_id: int) -> str:
+            try:
+                import psycopg2
+                conn_str = "postgresql://neondb_owner:npg_BidDY7RA4zWX@ep-long-haze-a17mcg70-pooler.ap-southeast-1.aws.neon.tech/program_tax?sslmode=require&channel_binding=require"
+                with psycopg2.connect(conn_str) as conn:
+                    with conn.cursor() as cur:
+                        try:
+                            cur.execute("SELECT remark FROM transfer_records WHERE id=%s", (rec_id,))
+                            row = cur.fetchone()
+                            return str(row[0]) if row and row[0] is not None else ""
+                        except Exception:
+                            try:
+                                conn.rollback()
+                            except Exception:
+                                pass
+                            return ""
+            except Exception:
+                return ""
         
         columns = [
             ft.DataColumn(ft.Text("เลือก", weight=ft.FontWeight.BOLD)),
@@ -1729,33 +2129,102 @@ def main(page: ft.Page):
             ft.DataColumn(ft.Text("ยอดรวม", weight=ft.FontWeight.BOLD)),
             ft.DataColumn(ft.Text("ค่าธรรมเนียม", weight=ft.FontWeight.BOLD)),
             ft.DataColumn(ft.Text("ยอดสุทธิ", weight=ft.FontWeight.BOLD)),
+            ft.DataColumn(ft.Text("หมายเหตุ", weight=ft.FontWeight.BOLD)),
             ft.DataColumn(ft.Text("วันที่สร้าง", weight=ft.FontWeight.BOLD))
         ]
         
         rows = []
         row_checkboxes.clear()
+        def make_on_change(rec_id: int):
+            def _handler(e):
+                nonlocal selected_transfer_id_for_pdf
+                # Uncheck all others
+                for rid, c in row_checkboxes.items():
+                    if rid != rec_id and c.value:
+                        c.value = False
+                # Set selected id if checked, else clear
+                selected_transfer_id_for_pdf = rec_id if e.control.value else None
+                try:
+                    page.update()
+                except Exception:
+                    pass
+            return _handler
+
+        def make_remark_toggle():
+            def _handler(e: ft.ControlEvent):
+                try:
+                    meta = e.control.data or {}
+                    rec_id = int(meta.get("rec_id"))
+                    current_text = str(meta.get("remark") or "")
+                    # Determine new value: check sets default remark if empty; uncheck clears remark
+                    if bool(e.control.value):
+                        new_val = current_text if current_text.strip() else "หมายเหตุ"
+                    else:
+                        new_val = None
+                    if update_remark(rec_id, new_val):
+                        e.control.tooltip = new_val or ""
+                        # store back current value for subsequent toggles
+                        e.control.data = {"rec_id": rec_id, "remark": new_val or ""}
+                        try:
+                            page.update()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            return _handler
+
         for record in records:
-            cb = ft.Checkbox(value=False)
+            cb = ft.Checkbox(value=False, on_change=make_on_change(record[0]))
             row_checkboxes[record[0]] = cb
-            rows.append(
-                ft.DataRow(cells=[
-                    ft.DataCell(cb),
-                    ft.DataCell(ft.Text(str(record[0]))),  # id
-                    ft.DataCell(ft.Text(record[1])),  # name
-                    ft.DataCell(ft.Text(record[2])),  # surname
-                    ft.DataCell(ft.Text(f"฿{record[3]:,.2f}")),  # transfer_amount
-                    ft.DataCell(ft.Text(record[4])),  # transfer_date
-                    ft.DataCell(ft.Text(record[5])),  # id_card
-                    ft.DataCell(ft.Text(record[6])),  # address
-                    ft.DataCell(ft.Text(f"{record[7]}%")),  # percent
-                    ft.DataCell(ft.Text(f"฿{record[8]:,.2f}")),  # total_amount
-                    ft.DataCell(ft.Text(f"฿{record[9]:,.2f}")),  # fee
-                    ft.DataCell(ft.Text(f"฿{record[10]:,.2f}")), # net_amount
-                    ft.DataCell(ft.Text(record[11].strftime("%d/%m/%Y %H:%M") if record[11] else "")) # created_at
-                ])
+            # Resolve remark text from record tuple or fallback DB fetch
+            remark_text = ""
+            try:
+                # remark exists when len(record) > 12 (index 12)
+                remark_text = str(record[12]) if len(record) > 12 and record[12] is not None else ""
+            except Exception:
+                remark_text = ""
+            if not remark_text:
+                try:
+                    remark_text = fetch_remark_by_id(int(record[0]))
+                except Exception:
+                    remark_text = ""
+
+            cells = [
+                ft.DataCell(cb),
+                ft.DataCell(ft.Text(str(record[0]))),  # id
+                ft.DataCell(ft.Text(record[1])),  # name
+                ft.DataCell(ft.Text(record[2])),  # surname
+                ft.DataCell(ft.Text(f"฿{record[3]:,.2f}")),  # transfer_amount
+                ft.DataCell(ft.Text(record[4])),  # transfer_date
+                ft.DataCell(ft.Text(record[5])),  # id_card
+                ft.DataCell(ft.Text(record[6])),  # address
+                ft.DataCell(ft.Text(f"{record[7]}%")),  # percent
+                ft.DataCell(ft.Text(f"฿{record[8]:,.2f}")),  # total_amount
+                ft.DataCell(ft.Text(f"฿{record[9]:,.2f}")),  # fee
+                ft.DataCell(ft.Text(f"฿{record[10]:,.2f}")), # net_amount
+            ]
+            # remark checkbox cell
+            cells.append(
+                ft.DataCell(
+                    ft.Checkbox(
+                        value=bool((remark_text or "").strip()),
+                        tooltip=remark_text or "",
+                        data={"rec_id": int(record[0]), "remark": remark_text or ""},
+                        on_change=make_remark_toggle()
+                    )
+                )
             )
+            # created_at exists at index 11 if remark not selected; handle safely
+            created_at_val = ""
+            try:
+                created_at_val = record[11].strftime("%d/%m/%Y %H:%M") if record[11] else ""
+            except Exception:
+                created_at_val = ""
+            cells.append(ft.DataCell(ft.Text(created_at_val)))
+
+            rows.append(ft.DataRow(cells=cells))
         
-        return ft.DataTable(
+        dt = ft.DataTable(
             columns=columns,
             rows=rows,
             border=ft.border.all(1, ft.Colors.GREY_300),
@@ -1767,6 +2236,11 @@ def main(page: ft.Page):
             divider_thickness=1,
             show_bottom_border=True,
             show_checkbox_column=False
+        )
+        # Wrap in horizontal scroll container so wide tables can be scrolled sideways
+        return ft.Container(
+            content=ft.Row([dt], scroll=ft.ScrollMode.AUTO),
+            expand=True
         )
     
     # Initialize data tables
@@ -1810,6 +2284,13 @@ def main(page: ft.Page):
                     ok, msg, count = app.import_from_excel(res.files[0].path)
                     import_status.value = ("✅ " if ok else "❌ ") + msg
                     import_status.color = ft.colors.GREEN_700 if ok else ft.colors.RED_700
+                    # Also export current data to source table so next startup auto-fills from it
+                    try:
+                        sok, smsg = app.export_to_source_table()
+                        if sok:
+                            import_status.value += f" | บันทึกลงตารางต้นทางแล้ว"
+                    except Exception:
+                        pass
                     refresh_grid()
             picker = ft.FilePicker(on_result=on_res)
             page.overlay.append(picker)
@@ -2185,18 +2666,25 @@ def main(page: ft.Page):
     # Refresh data function
     def refresh_data_clicked(e):
         nonlocal data_table, full_data_grid, stats_cards
+        try:
+            ok, msg, cnt = app.reset_from_excel(r"C:\\program_tax\\transfer_records_update.xlsx")
+            status_text.value = ("✅ " if ok else "❌ ") + msg
+            status_text.color = ft.colors.GREEN_700 if ok else ft.colors.RED_700
+        except Exception as ex:
+            status_text.value = f"❌ รีเซ็ตไม่สำเร็จ: {ex}"
+            status_text.color = ft.colors.RED_700
+
         new_stats = app.get_statistics()
-        
         # Update statistics cards
         stats_cards.controls[0].content.controls[1].value = f"{new_stats[0]:,}"
         stats_cards.controls[1].content.controls[1].value = f"฿{new_stats[1]:,.2f}"
         stats_cards.controls[2].content.controls[1].value = f"฿{new_stats[2]:,.2f}"
         stats_cards.controls[3].content.controls[1].value = f"฿{new_stats[3]:,.2f}"
-        
+
         # Recreate data tables
         data_table = create_data_table()
         full_data_grid = create_full_data_grid()
-        
+
         # Update the current tab content
         if nav_rail.selected_index == 0:
             content_area.content = create_dashboard_tab()
@@ -2204,7 +2692,7 @@ def main(page: ft.Page):
             content_area.content = create_data_management_tab()
         elif nav_rail.selected_index == 2:
             content_area.content = create_all_data_tab()
-        
+
         page.update()
     
     # Update UI after CRUD operations
@@ -2234,6 +2722,106 @@ def main(page: ft.Page):
         page.update()
     
     # CRUD Event Handlers
+    def dashboard_load_selected_clicked(e):
+        try:
+            nonlocal selected_transfer_id_for_pdf
+            if not selected_transfer_id_for_pdf:
+                status_text.value = "❌ กรุณาเลือกแถวจากตารางก่อน"
+                status_text.color = ft.Colors.RED_700
+                page.update()
+                return
+            record = app.get_record_by_id(int(selected_transfer_id_for_pdf))
+            if not record:
+                status_text.value = "❌ ไม่พบข้อมูลจากรายการที่เลือก"
+                status_text.color = ft.Colors.RED_700
+                page.update()
+                return
+            # Fill fields
+            record_id_input.value = str(record[0])
+            name_input.value = record[1]
+            surname_input.value = record[2]
+            transfer_amount_input.value = str(record[3])
+            transfer_date_input.value = record[4]
+            id_card_input.value = record[5]
+            address_input.value = record[6]
+            percent_input.value = str(record[7])
+            remark_input.value = record[11] or ""
+            page.update()
+        except Exception as ex:
+            status_text.value = f"เกิดข้อผิดพลาด: {ex}"
+            status_text.color = ft.Colors.RED_700
+            page.update()
+
+    def dashboard_add_clicked(e):
+        try:
+            if not name_input.value or not surname_input.value or not transfer_amount_input.value:
+                raise ValueError("กรุณากรอกข้อมูลให้ครบถ้วน")
+            transfer_amount = float(transfer_amount_input.value)
+            percent = float(percent_input.value) if percent_input.value else 3.0
+            ok, msg = app.add_record(
+                name_input.value,
+                surname_input.value,
+                transfer_amount,
+                transfer_date_input.value or "01/01/2025",
+                id_card_input.value or "0000000000000",
+                address_input.value or "ไม่ระบุ",
+                percent,
+                (remark_input.value or "").strip() or None
+            )
+            status_text.value = ("✅ " if ok else "❌ ") + msg
+            status_text.color = ft.Colors.GREEN_700 if ok else ft.Colors.RED_700
+            # Clear minimal fields after add
+            record_id_input.value = ""
+            name_input.value = ""; surname_input.value = ""; transfer_amount_input.value = ""
+            transfer_date_input.value = ""; id_card_input.value = ""; address_input.value = ""
+            percent_input.value = ""; remark_input.value = ""
+            update_ui_after_crud()
+        except Exception as ex:
+            status_text.value = f"เกิดข้อผิดพลาด: {ex}"
+            status_text.color = ft.Colors.RED_700
+            page.update()
+
+    def dashboard_update_clicked(e):
+        try:
+            if not record_id_input.value:
+                raise ValueError("กรุณากรอก ID รายการที่จะอัปเดต")
+            transfer_amount = float(transfer_amount_input.value or 0)
+            percent = float(percent_input.value or 3.0)
+            ok, msg = app.update_record(
+                int(record_id_input.value),
+                name_input.value or "",
+                surname_input.value or "",
+                transfer_amount,
+                transfer_date_input.value or "",
+                id_card_input.value or "",
+                address_input.value or "",
+                percent,
+                (remark_input.value or "").strip() or None
+            )
+            status_text.value = ("✅ " if ok else "❌ ") + msg
+            status_text.color = ft.Colors.GREEN_700 if ok else ft.Colors.RED_700
+            update_ui_after_crud()
+        except Exception as ex:
+            status_text.value = f"เกิดข้อผิดพลาด: {ex}"
+            status_text.color = ft.Colors.RED_700
+            page.update()
+
+    def dashboard_delete_clicked(e):
+        try:
+            if not record_id_input.value:
+                raise ValueError("กรุณากรอก ID รายการที่จะลบ")
+            ok, msg = app.delete_record(int(record_id_input.value))
+            status_text.value = ("✅ " if ok else "❌ ") + msg
+            status_text.color = ft.Colors.GREEN_700 if ok else ft.Colors.RED_700
+            record_id_input.value = ""
+            name_input.value = ""; surname_input.value = ""; transfer_amount_input.value = ""
+            transfer_date_input.value = ""; id_card_input.value = ""; address_input.value = ""
+            percent_input.value = ""; remark_input.value = ""
+            update_ui_after_crud()
+        except Exception as ex:
+            status_text.value = f"เกิดข้อผิดพลาด: {ex}"
+            status_text.color = ft.Colors.RED_700
+            page.update()
     def add_record_clicked(e):
         try:
             # Validate required fields
@@ -2499,6 +3087,53 @@ def main(page: ft.Page):
                     ], scroll=ft.ScrollMode.AUTO),
                     height=400,
                     border=ft.border.all(1, ft.Colors.GREY_300),
+                    border_radius=10,
+                    padding=10
+                )
+                ,
+                # Quick edit panel under the grid
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("แก้ไขข้อมูลอย่างรวดเร็ว (Dashboard)", size=16, weight=ft.FontWeight.BOLD),
+                        ft.Row([
+                            record_id_input,
+                            ft.ElevatedButton(
+                                text="⬇️ โหลดจากแถวที่เลือก",
+                                icon=ft.Icons.DOWNLOAD,
+                                on_click=dashboard_load_selected_clicked,
+                                style=ft.ButtonStyle(bgcolor=ft.Colors.ORANGE_700, color=ft.Colors.WHITE),
+                                width=180
+                            )
+                        ], spacing=10),
+                        ft.Row([name_input, surname_input, percent_input], spacing=10),
+                        ft.Row([transfer_amount_input, transfer_date_input], spacing=10),
+                        ft.Row([id_card_input, remark_input], spacing=10),
+                        address_input,
+                        ft.Row([
+                            ft.ElevatedButton(
+                                text="➕ เพิ่ม",
+                                icon=ft.Icons.ADD,
+                                on_click=dashboard_add_clicked,
+                                style=ft.ButtonStyle(bgcolor=ft.Colors.GREEN_700, color=ft.Colors.WHITE),
+                                width=120
+                            ),
+                            ft.ElevatedButton(
+                                text="✏️ แก้ไข",
+                                icon=ft.Icons.EDIT,
+                                on_click=dashboard_update_clicked,
+                                style=ft.ButtonStyle(bgcolor=ft.Colors.BLUE_700, color=ft.Colors.WHITE),
+                                width=120
+                            ),
+                            ft.ElevatedButton(
+                                text="🗑️ ลบ",
+                                icon=ft.Icons.DELETE,
+                                on_click=dashboard_delete_clicked,
+                                style=ft.ButtonStyle(bgcolor=ft.Colors.RED_700, color=ft.Colors.WHITE),
+                                width=120
+                            )
+                        ], spacing=10)
+                    ], spacing=10),
+                    bgcolor=ft.Colors.GREY_50,
                     border_radius=10,
                     padding=10
                 )
@@ -5541,6 +6176,73 @@ def main(page: ft.Page):
                 ("card_number_8", "เลขที่บัตร 8", 540, 530, 10),
                 ("card_number_9", "เลขที่บัตร 9", 600, 530, 10),
                 ("card_number_10", "เลขที่บัตร 10", 660, 530, 10),
+                # Salary digit positions 1-10
+                ("salary_pos_1", "เงินเดือน-ตำแหน่ง 1", 120, 395, 10),
+                ("salary_pos_2", "เงินเดือน-ตำแหน่ง 2", 170, 395, 10),
+                ("salary_pos_3", "เงินเดือน-ตำแหน่ง 3", 220, 395, 10),
+                ("salary_pos_4", "เงินเดือน-ตำแหน่ง 4", 270, 395, 10),
+                ("salary_pos_5", "เงินเดือน-ตำแหน่ง 5", 320, 395, 10),
+                ("salary_pos_6", "เงินเดือน-ตำแหน่ง 6", 370, 395, 10),
+                ("salary_pos_7", "เงินเดือน-ตำแหน่ง 7", 420, 395, 10),
+                ("salary_pos_8", "เงินเดือน-ตำแหน่ง 8", 470, 395, 10),
+                ("salary_pos_9", "เงินเดือน-ตำแหน่ง 9", 520, 395, 10),
+                ("salary_pos_10", "เงินเดือน-ตำแหน่ง 10", 570, 395, 10),
+                # Salary tax positions 1-8
+                ("tax_pos_1", "ภาษีเงินเดือน-ตำแหน่ง 1", 120, 410, 10),
+                ("tax_pos_2", "ภาษีเงินเดือน-ตำแหน่ง 2", 170, 410, 10),
+                ("tax_pos_3", "ภาษีเงินเดือน-ตำแหน่ง 3", 220, 410, 10),
+                ("tax_pos_4", "ภาษีเงินเดือน-ตำแหน่ง 4", 270, 410, 10),
+                ("tax_pos_5", "ภาษีเงินเดือน-ตำแหน่ง 5", 320, 410, 10),
+                ("tax_pos_6", "ภาษีเงินเดือน-ตำแหน่ง 6", 370, 410, 10),
+                ("tax_pos_7", "ภาษีเงินเดือน-ตำแหน่ง 7", 420, 410, 10),
+                ("tax_pos_8", "ภาษีเงินเดือน-ตำแหน่ง 8", 470, 410, 10),
+                # Fee digit positions 1-10
+                ("fee_pos_1", "ค่าธรรมเนียม-ตำแหน่ง 1", 120, 435, 10),
+                ("fee_pos_2", "ค่าธรรมเนียม-ตำแหน่ง 2", 170, 435, 10),
+                ("fee_pos_3", "ค่าธรรมเนียม-ตำแหน่ง 3", 220, 435, 10),
+                ("fee_pos_4", "ค่าธรรมเนียม-ตำแหน่ง 4", 270, 435, 10),
+                ("fee_pos_5", "ค่าธรรมเนียม-ตำแหน่ง 5", 320, 435, 10),
+                ("fee_pos_6", "ค่าธรรมเนียม-ตำแหน่ง 6", 370, 435, 10),
+                ("fee_pos_7", "ค่าธรรมเนียม-ตำแหน่ง 7", 420, 435, 10),
+                ("fee_pos_8", "ค่าธรรมเนียม-ตำแหน่ง 8", 470, 435, 10),
+                ("fee_pos_9", "ค่าธรรมเนียม-ตำแหน่ง 9", 520, 435, 10),
+                ("fee_pos_10", "ค่าธรรมเนียม-ตำแหน่ง 10", 570, 435, 10),
+                # Fee tax positions 1-8
+                ("fee_tax_pos_1", "ภาษีค่าธรรมเนียม-ตำแหน่ง 1", 120, 450, 10),
+                ("fee_tax_pos_2", "ภาษีค่าธรรมเนียม-ตำแหน่ง 2", 170, 450, 10),
+                ("fee_tax_pos_3", "ภาษีค่าธรรมเนียม-ตำแหน่ง 3", 220, 450, 10),
+                ("fee_tax_pos_4", "ภาษีค่าธรรมเนียม-ตำแหน่ง 4", 270, 450, 10),
+                ("fee_tax_pos_5", "ภาษีค่าธรรมเนียม-ตำแหน่ง 5", 320, 450, 10),
+                ("fee_tax_pos_6", "ภาษีค่าธรรมเนียม-ตำแหน่ง 6", 370, 450, 10),
+                ("fee_tax_pos_7", "ภาษีค่าธรรมเนียม-ตำแหน่ง 7", 420, 450, 10),
+                ("fee_tax_pos_8", "ภาษีค่าธรรมเนียม-ตำแหน่ง 8", 470, 450, 10),
+                # Total income positions 1-10
+                ("total_income_pos_1", "รวมเงิน-ตำแหน่ง 1", 120, 475, 10),
+                ("total_income_pos_2", "รวมเงิน-ตำแหน่ง 2", 170, 475, 10),
+                ("total_income_pos_3", "รวมเงิน-ตำแหน่ง 3", 220, 475, 10),
+                ("total_income_pos_4", "รวมเงิน-ตำแหน่ง 4", 270, 475, 10),
+                ("total_income_pos_5", "รวมเงิน-ตำแหน่ง 5", 320, 475, 10),
+                ("total_income_pos_6", "รวมเงิน-ตำแหน่ง 6", 370, 475, 10),
+                ("total_income_pos_7", "รวมเงิน-ตำแหน่ง 7", 420, 475, 10),
+                ("total_income_pos_8", "รวมเงิน-ตำแหน่ง 8", 470, 475, 10),
+                ("total_income_pos_9", "รวมเงิน-ตำแหน่ง 9", 520, 475, 10),
+                ("total_income_pos_10", "รวมเงิน-ตำแหน่ง 10", 570, 475, 10),
+                # Total tax positions 1-8
+                ("total_tax_pos_1", "รวมภาษี-ตำแหน่ง 1", 120, 490, 10),
+                ("total_tax_pos_2", "รวมภาษี-ตำแหน่ง 2", 170, 490, 10),
+                ("total_tax_pos_3", "รวมภาษี-ตำแหน่ง 3", 220, 490, 10),
+                ("total_tax_pos_4", "รวมภาษี-ตำแหน่ง 4", 270, 490, 10),
+                ("total_tax_pos_5", "รวมภาษี-ตำแหน่ง 5", 320, 490, 10),
+                ("total_tax_pos_6", "รวมภาษี-ตำแหน่ง 6", 370, 490, 10),
+                ("total_tax_pos_7", "รวมภาษี-ตำแหน่ง 7", 420, 490, 10),
+                ("total_tax_pos_8", "รวมภาษี-ตำแหน่ง 8", 470, 490, 10),
+                # Dot positions 1-6
+                ("dot_1", "dot 1", 120, 505, 10),
+                ("dot_2", "dot 2", 160, 505, 10),
+                ("dot_3", "dot 3", 200, 505, 10),
+                ("dot_4", "dot 4", 240, 505, 10),
+                ("dot_5", "dot 5", 280, 505, 10),
+                ("dot_6", "dot 6", 320, 505, 10),
             ]
             
             coordinate_fields.clear()
@@ -6611,6 +7313,133 @@ def main(page: ft.Page):
                         field_value = card_number_9.value or ""
                     elif field_id == "card_number_10":
                         field_value = card_number_10.value or ""
+                    # salary positions 1..10
+                    elif field_id == "salary_pos_1":
+                        field_value = salary_pos_1.value or ""
+                    elif field_id == "salary_pos_2":
+                        field_value = salary_pos_2.value or ""
+                    elif field_id == "salary_pos_3":
+                        field_value = salary_pos_3.value or ""
+                    elif field_id == "salary_pos_4":
+                        field_value = salary_pos_4.value or ""
+                    elif field_id == "salary_pos_5":
+                        field_value = salary_pos_5.value or ""
+                    elif field_id == "salary_pos_6":
+                        field_value = salary_pos_6.value or ""
+                    elif field_id == "salary_pos_7":
+                        field_value = salary_pos_7.value or ""
+                    elif field_id == "salary_pos_8":
+                        field_value = salary_pos_8.value or ""
+                    elif field_id == "salary_pos_9":
+                        field_value = salary_pos_9.value or ""
+                    elif field_id == "salary_pos_10":
+                        field_value = salary_pos_10.value or ""
+                    # salary tax positions 1..8
+                    elif field_id == "tax_pos_1":
+                        field_value = tax_pos_1.value or ""
+                    elif field_id == "tax_pos_2":
+                        field_value = tax_pos_2.value or ""
+                    elif field_id == "tax_pos_3":
+                        field_value = tax_pos_3.value or ""
+                    elif field_id == "tax_pos_4":
+                        field_value = tax_pos_4.value or ""
+                    elif field_id == "tax_pos_5":
+                        field_value = tax_pos_5.value or ""
+                    elif field_id == "tax_pos_6":
+                        field_value = tax_pos_6.value or ""
+                    elif field_id == "tax_pos_7":
+                        field_value = tax_pos_7.value or ""
+                    elif field_id == "tax_pos_8":
+                        field_value = tax_pos_8.value or ""
+                    # fee positions 1..10
+                    elif field_id == "fee_pos_1":
+                        field_value = fee_pos_1.value or ""
+                    elif field_id == "fee_pos_2":
+                        field_value = fee_pos_2.value or ""
+                    elif field_id == "fee_pos_3":
+                        field_value = fee_pos_3.value or ""
+                    elif field_id == "fee_pos_4":
+                        field_value = fee_pos_4.value or ""
+                    elif field_id == "fee_pos_5":
+                        field_value = fee_pos_5.value or ""
+                    elif field_id == "fee_pos_6":
+                        field_value = fee_pos_6.value or ""
+                    elif field_id == "fee_pos_7":
+                        field_value = fee_pos_7.value or ""
+                    elif field_id == "fee_pos_8":
+                        field_value = fee_pos_8.value or ""
+                    elif field_id == "fee_pos_9":
+                        field_value = fee_pos_9.value or ""
+                    elif field_id == "fee_pos_10":
+                        field_value = fee_pos_10.value or ""
+                    # fee tax positions 1..8
+                    elif field_id == "fee_tax_pos_1":
+                        field_value = fee_tax_pos_1.value or ""
+                    elif field_id == "fee_tax_pos_2":
+                        field_value = fee_tax_pos_2.value or ""
+                    elif field_id == "fee_tax_pos_3":
+                        field_value = fee_tax_pos_3.value or ""
+                    elif field_id == "fee_tax_pos_4":
+                        field_value = fee_tax_pos_4.value or ""
+                    elif field_id == "fee_tax_pos_5":
+                        field_value = fee_tax_pos_5.value or ""
+                    elif field_id == "fee_tax_pos_6":
+                        field_value = fee_tax_pos_6.value or ""
+                    elif field_id == "fee_tax_pos_7":
+                        field_value = fee_tax_pos_7.value or ""
+                    elif field_id == "fee_tax_pos_8":
+                        field_value = fee_tax_pos_8.value or ""
+                    # total income positions 1..10
+                    elif field_id == "total_income_pos_1":
+                        field_value = total_income_pos_1.value or ""
+                    elif field_id == "total_income_pos_2":
+                        field_value = total_income_pos_2.value or ""
+                    elif field_id == "total_income_pos_3":
+                        field_value = total_income_pos_3.value or ""
+                    elif field_id == "total_income_pos_4":
+                        field_value = total_income_pos_4.value or ""
+                    elif field_id == "total_income_pos_5":
+                        field_value = total_income_pos_5.value or ""
+                    elif field_id == "total_income_pos_6":
+                        field_value = total_income_pos_6.value or ""
+                    elif field_id == "total_income_pos_7":
+                        field_value = total_income_pos_7.value or ""
+                    elif field_id == "total_income_pos_8":
+                        field_value = total_income_pos_8.value or ""
+                    elif field_id == "total_income_pos_9":
+                        field_value = total_income_pos_9.value or ""
+                    elif field_id == "total_income_pos_10":
+                        field_value = total_income_pos_10.value or ""
+                    # total tax positions 1..8
+                    elif field_id == "total_tax_pos_1":
+                        field_value = total_tax_pos_1.value or ""
+                    elif field_id == "total_tax_pos_2":
+                        field_value = total_tax_pos_2.value or ""
+                    elif field_id == "total_tax_pos_3":
+                        field_value = total_tax_pos_3.value or ""
+                    elif field_id == "total_tax_pos_4":
+                        field_value = total_tax_pos_4.value or ""
+                    elif field_id == "total_tax_pos_5":
+                        field_value = total_tax_pos_5.value or ""
+                    elif field_id == "total_tax_pos_6":
+                        field_value = total_tax_pos_6.value or ""
+                    elif field_id == "total_tax_pos_7":
+                        field_value = total_tax_pos_7.value or ""
+                    elif field_id == "total_tax_pos_8":
+                        field_value = total_tax_pos_8.value or ""
+                    # dot 1..6
+                    elif field_id == "dot_1":
+                        field_value = dot_1.value or ""
+                    elif field_id == "dot_2":
+                        field_value = dot_2.value or ""
+                    elif field_id == "dot_3":
+                        field_value = dot_3.value or ""
+                    elif field_id == "dot_4":
+                        field_value = dot_4.value or ""
+                    elif field_id == "dot_5":
+                        field_value = dot_5.value or ""
+                    elif field_id == "dot_6":
+                        field_value = dot_6.value or ""
                     
                     if field_value:
                         # Convert Y coordinate from top to bottom (PDF coordinate system)
@@ -7228,20 +8057,38 @@ def main(page: ft.Page):
 
                 with psycopg2.connect(conn_str) as conn:
                     with conn.cursor() as cur:
-                        cur.execute(
-                            """
-                            SELECT id, name, surname, transfer_amount, transfer_date, id_card, address, percent, total_amount, fee, net_amount, created_at
-                            FROM transfer_records
-                            WHERE id = %s
-                            """,
-                            (selected_transfer_id_for_pdf,)
-                        )
+                        # Try to fetch optional remark column if exists
+                        try:
+                            cur.execute(
+                                """
+                                SELECT id, name, surname, transfer_amount, transfer_date, id_card, address, percent, total_amount, fee, net_amount, created_at, remark
+                                FROM transfer_records
+                                WHERE id = %s
+                                """,
+                                (selected_transfer_id_for_pdf,)
+                            )
+                        except Exception:
+                            # Reset aborted transaction before fallback
+                            try:
+                                conn.rollback()
+                            except Exception:
+                                pass
+                            cur.execute(
+                                """
+                                SELECT id, name, surname, transfer_amount, transfer_date, id_card, address, percent, total_amount, fee, net_amount, created_at
+                                FROM transfer_records
+                                WHERE id = %s
+                                """,
+                                (selected_transfer_id_for_pdf,)
+                            )
                         rec = cur.fetchone()
                         if not rec:
                             return
 
                         # Unpack
-                        (_id, _name, _surname, _amount, _date, _idcard, _address, _percent, _total, _fee, _net, _created) = rec
+                        # Unpack with optional remark at last position
+                        _id, _name, _surname, _amount, _date, _idcard, _address, _percent, _total, _fee, _net, _created, *_rest = rec
+                        _remark = _rest[0] if _rest else None
 
                         # Map to crystal report fields (fill what we have)
                         withholdee_name.value = f"{_name or ''} {_surname or ''}".strip()
@@ -7250,9 +8097,18 @@ def main(page: ft.Page):
                         # Put transfer amount into income_1_amount for preview/fill convenience
                         income_1_amount.value = f"{float(_amount or 0):.2f}"
                         income_1_tax.value = "0.00"
-                        income_2_amount.value = "0.00"
-                        income_2_tax.value = "0.00"
-                        # Totals presentation
+                        # Map fee/total based on remark
+                        if (_remark or "").strip() == "ค่าธรรมเนียม":
+                            income_2_amount.value = "0.00"
+                            income_2_tax.value = f"{float(_total or _fee or 0):.2f}"
+                        elif (_remark or "").strip() == "เงินเดือน":
+                            income_2_amount.value = f"{float(_amount or 0):.2f}"
+                            income_2_tax.value = "0.00"
+                        else:
+                            # default behavior fallbacks
+                            income_2_amount.value = "0.00"
+                            income_2_tax.value = f"{float(_fee or 0):.2f}"
+                        # Totals presentation (income total and tax total)
                         total_income_display.value = f"{float(_total or _amount or 0):,.2f}"
                         total_tax_display.value = f"{float(_fee or 0):,.2f}"
                         total_tax_text.value = ""
@@ -7294,6 +8150,73 @@ def main(page: ft.Page):
         # Income fields
         income_1_amount = ft.TextField(label="เงินเดือน", width=200, keyboard_type=ft.KeyboardType.NUMBER, value="")
         income_1_tax = ft.TextField(label="ภาษี", width=150, keyboard_type=ft.KeyboardType.NUMBER, value="")
+        # Ten position boxes to split salary digits (ตำแหน่งที่ 1..10)
+        salary_pos_1 = ft.TextField(label="ตำแหน่งที่ 1", width=60, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        salary_pos_2 = ft.TextField(label="ตำแหน่งที่ 2", width=60, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        salary_pos_3 = ft.TextField(label="ตำแหน่งที่ 3", width=60, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        salary_pos_4 = ft.TextField(label="ตำแหน่งที่ 4", width=60, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        salary_pos_5 = ft.TextField(label="ตำแหน่งที่ 5", width=60, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        salary_pos_6 = ft.TextField(label="ตำแหน่งที่ 6", width=60, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        salary_pos_7 = ft.TextField(label="ตำแหน่งที่ 7", width=60, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        salary_pos_8 = ft.TextField(label="ตำแหน่งที่ 8", width=60, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        salary_pos_9 = ft.TextField(label="ตำแหน่งที่ 9", width=60, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        salary_pos_10 = ft.TextField(label="ตำแหน่งที่ 10", width=70, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        # Ten position boxes for total income digits
+        total_income_pos_1 = ft.TextField(label="รวมเงิน-ตำแหน่ง 1", width=80, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        total_income_pos_2 = ft.TextField(label="รวมเงิน-ตำแหน่ง 2", width=80, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        total_income_pos_3 = ft.TextField(label="รวมเงิน-ตำแหน่ง 3", width=80, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        total_income_pos_4 = ft.TextField(label="รวมเงิน-ตำแหน่ง 4", width=80, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        total_income_pos_5 = ft.TextField(label="รวมเงิน-ตำแหน่ง 5", width=80, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        total_income_pos_6 = ft.TextField(label="รวมเงิน-ตำแหน่ง 6", width=80, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        total_income_pos_7 = ft.TextField(label="รวมเงิน-ตำแหน่ง 7", width=80, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        total_income_pos_8 = ft.TextField(label="รวมเงิน-ตำแหน่ง 8", width=80, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        total_income_pos_9 = ft.TextField(label="รวมเงิน-ตำแหน่ง 9", width=80, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        total_income_pos_10 = ft.TextField(label="รวมเงิน-ตำแหน่ง 10", width=90, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        # Eight position boxes for total tax digits
+        total_tax_pos_1 = ft.TextField(label="รวมภาษี-ตำแหน่ง 1", width=100, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        total_tax_pos_2 = ft.TextField(label="รวมภาษี-ตำแหน่ง 2", width=100, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        total_tax_pos_3 = ft.TextField(label="รวมภาษี-ตำแหน่ง 3", width=100, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        total_tax_pos_4 = ft.TextField(label="รวมภาษี-ตำแหน่ง 4", width=100, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        total_tax_pos_5 = ft.TextField(label="รวมภาษี-ตำแหน่ง 5", width=100, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        total_tax_pos_6 = ft.TextField(label="รวมภาษี-ตำแหน่ง 6", width=100, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        total_tax_pos_7 = ft.TextField(label="รวมภาษี-ตำแหน่ง 7", width=100, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        total_tax_pos_8 = ft.TextField(label="รวมภาษี-ตำแหน่ง 8", width=100, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        # Eight position boxes for salary tax digits
+        tax_pos_1 = ft.TextField(label="ภาษี ตำแหน่งที่ 1", width=70, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        tax_pos_2 = ft.TextField(label="ภาษี ตำแหน่งที่ 2", width=70, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        tax_pos_3 = ft.TextField(label="ภาษี ตำแหน่งที่ 3", width=70, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        tax_pos_4 = ft.TextField(label="ภาษี ตำแหน่งที่ 4", width=70, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        tax_pos_5 = ft.TextField(label="ภาษี ตำแหน่งที่ 5", width=70, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        tax_pos_6 = ft.TextField(label="ภาษี ตำแหน่งที่ 6", width=70, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        tax_pos_7 = ft.TextField(label="ภาษี ตำแหน่งที่ 7", width=70, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        tax_pos_8 = ft.TextField(label="ภาษี ตำแหน่งที่ 8", width=70, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        # Ten position boxes for fee amount digits
+        fee_pos_1 = ft.TextField(label="ค่าธรรมเนียม ตำแหน่งที่ 1", width=90, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        fee_pos_2 = ft.TextField(label="ค่าธรรมเนียม ตำแหน่งที่ 2", width=90, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        fee_pos_3 = ft.TextField(label="ค่าธรรมเนียม ตำแหน่งที่ 3", width=90, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        fee_pos_4 = ft.TextField(label="ค่าธรรมเนียม ตำแหน่งที่ 4", width=90, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        fee_pos_5 = ft.TextField(label="ค่าธรรมเนียม ตำแหน่งที่ 5", width=90, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        fee_pos_6 = ft.TextField(label="ค่าธรรมเนียม ตำแหน่งที่ 6", width=90, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        fee_pos_7 = ft.TextField(label="ค่าธรรมเนียม ตำแหน่งที่ 7", width=90, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        fee_pos_8 = ft.TextField(label="ค่าธรรมเนียม ตำแหน่งที่ 8", width=90, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        fee_pos_9 = ft.TextField(label="ค่าธรรมเนียม ตำแหน่งที่ 9", width=90, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        fee_pos_10 = ft.TextField(label="ค่าธรรมเนียม ตำแหน่งที่ 10", width=100, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        # Eight position boxes for fee tax digits
+        fee_tax_pos_1 = ft.TextField(label="ภาษีค่าธรรมเนียม ตำแหน่งที่ 1", width=130, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        fee_tax_pos_2 = ft.TextField(label="ภาษีค่าธรรมเนียม ตำแหน่งที่ 2", width=130, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        fee_tax_pos_3 = ft.TextField(label="ภาษีค่าธรรมเนียม ตำแหน่งที่ 3", width=130, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        fee_tax_pos_4 = ft.TextField(label="ภาษีค่าธรรมเนียม ตำแหน่งที่ 4", width=130, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        fee_tax_pos_5 = ft.TextField(label="ภาษีค่าธรรมเนียม ตำแหน่งที่ 5", width=130, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        fee_tax_pos_6 = ft.TextField(label="ภาษีค่าธรรมเนียม ตำแหน่งที่ 6", width=130, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        fee_tax_pos_7 = ft.TextField(label="ภาษีค่าธรรมเนียม ตำแหน่งที่ 7", width=130, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        fee_tax_pos_8 = ft.TextField(label="ภาษีค่าธรรมเนียม ตำแหน่งที่ 8", width=130, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        # Six dot boxes
+        dot_1 = ft.TextField(label="dot 1", width=60, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        dot_2 = ft.TextField(label="dot 2", width=60, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        dot_3 = ft.TextField(label="dot 3", width=60, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        dot_4 = ft.TextField(label="dot 4", width=60, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        dot_5 = ft.TextField(label="dot 5", width=60, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        dot_6 = ft.TextField(label="dot 6", width=60, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
         income_2_amount = ft.TextField(label="ค่าธรรมเนียม", width=200, keyboard_type=ft.KeyboardType.NUMBER, value="")
         income_2_tax = ft.TextField(label="ภาษี", width=150, keyboard_type=ft.KeyboardType.NUMBER, value="")
         
@@ -7373,6 +8296,63 @@ def main(page: ft.Page):
                 
                 total_income_display.value = f"{total_income:,.2f}"
                 total_tax_display.value = f"{total_tax:,.2f}"
+                # Auto-split income_1_amount digits into salary_pos_1..10 (right aligned by last digits)
+                try:
+                    s = ''.join([ch for ch in (income_1_amount.value or '') if ch.isdigit()])
+                    # keep up to 10 last digits
+                    s = s[-10:]
+                    slots = ["", "", "", "", "", "", "", "", "", ""]
+                    # fill from rightmost
+                    for i, ch in enumerate(reversed(s)):
+                        slots[-(i+1)] = ch
+                    salary_pos_1.value, salary_pos_2.value, salary_pos_3.value, salary_pos_4.value, salary_pos_5.value, \
+                    salary_pos_6.value, salary_pos_7.value, salary_pos_8.value, salary_pos_9.value, salary_pos_10.value = slots
+                except Exception:
+                    pass
+                # Auto-split taxes and fees similarly
+                try:
+                    ts = ''.join([ch for ch in (income_1_tax.value or '') if ch.isdigit()])[-8:]
+                    tslots = ["", "", "", "", "", "", "", ""]
+                    for i, ch in enumerate(reversed(ts)):
+                        tslots[-(i+1)] = ch
+                    tax_pos_1.value, tax_pos_2.value, tax_pos_3.value, tax_pos_4.value, tax_pos_5.value, tax_pos_6.value, tax_pos_7.value, tax_pos_8.value = tslots
+                except Exception:
+                    pass
+                try:
+                    fs = ''.join([ch for ch in (income_2_amount.value or '') if ch.isdigit()])[-10:]
+                    fslots = ["", "", "", "", "", "", "", "", "", ""]
+                    for i, ch in enumerate(reversed(fs)):
+                        fslots[-(i+1)] = ch
+                    fee_pos_1.value, fee_pos_2.value, fee_pos_3.value, fee_pos_4.value, fee_pos_5.value, \
+                    fee_pos_6.value, fee_pos_7.value, fee_pos_8.value, fee_pos_9.value, fee_pos_10.value = fslots
+                except Exception:
+                    pass
+                try:
+                    fts = ''.join([ch for ch in (income_2_tax.value or '') if ch.isdigit()])[-8:]
+                    ft_slots = ["", "", "", "", "", "", "", ""]
+                    for i, ch in enumerate(reversed(fts)):
+                        ft_slots[-(i+1)] = ch
+                    fee_tax_pos_1.value, fee_tax_pos_2.value, fee_tax_pos_3.value, fee_tax_pos_4.value, fee_tax_pos_5.value, fee_tax_pos_6.value, fee_tax_pos_7.value, fee_tax_pos_8.value = ft_slots
+                except Exception:
+                    pass
+                # Auto-split total income and total tax
+                try:
+                    tis = ''.join([ch for ch in (total_income_display.value or '') if ch.isdigit()])[-10:]
+                    tislots = ["", "", "", "", "", "", "", "", "", ""]
+                    for i, ch in enumerate(reversed(tis)):
+                        tislots[-(i+1)] = ch
+                    total_income_pos_1.value, total_income_pos_2.value, total_income_pos_3.value, total_income_pos_4.value, total_income_pos_5.value, \
+                    total_income_pos_6.value, total_income_pos_7.value, total_income_pos_8.value, total_income_pos_9.value, total_income_pos_10.value = tislots
+                except Exception:
+                    pass
+                try:
+                    tts = ''.join([ch for ch in (total_tax_display.value or '') if ch.isdigit()])[-8:]
+                    ttslots = ["", "", "", "", "", "", "", ""]
+                    for i, ch in enumerate(reversed(tts)):
+                        ttslots[-(i+1)] = ch
+                    total_tax_pos_1.value, total_tax_pos_2.value, total_tax_pos_3.value, total_tax_pos_4.value, total_tax_pos_5.value, total_tax_pos_6.value, total_tax_pos_7.value, total_tax_pos_8.value = ttslots
+                except Exception:
+                    pass
                 page.update()
             except ValueError:
                 pass
@@ -7801,9 +8781,25 @@ def main(page: ft.Page):
                         ft.Container(
                             content=ft.Column([
                                 ft.Row([income_1_amount, income_1_tax], spacing=10),
+                                ft.Row([salary_pos_1, salary_pos_2, salary_pos_3, salary_pos_4, salary_pos_5,
+                                        salary_pos_6, salary_pos_7, salary_pos_8, salary_pos_9, salary_pos_10], spacing=6, wrap=True),
+                                ft.Row([tax_pos_1, tax_pos_2, tax_pos_3, tax_pos_4, tax_pos_5, tax_pos_6, tax_pos_7, tax_pos_8], spacing=6, wrap=True),
+                                ft.Row([fee_pos_1, fee_pos_2, fee_pos_3, fee_pos_4, fee_pos_5,
+                                        fee_pos_6, fee_pos_7, fee_pos_8, fee_pos_9, fee_pos_10], spacing=6, wrap=True),
+                                ft.Row([fee_tax_pos_1, fee_tax_pos_2, fee_tax_pos_3, fee_tax_pos_4,
+                                        fee_tax_pos_5, fee_tax_pos_6, fee_tax_pos_7, fee_tax_pos_8], spacing=6, wrap=True),
+                                ft.Row([dot_1, dot_2, dot_3, dot_4, dot_5, dot_6], spacing=6, wrap=True),
                                 ft.Row([income_2_amount, income_2_tax], spacing=10),
                                 ft.Divider(height=20, color=ft.colors.BLUE_700),
                                 ft.Row([total_income_display, total_tax_display], spacing=10),
+                                ft.Row([
+                                    total_income_pos_1, total_income_pos_2, total_income_pos_3, total_income_pos_4, total_income_pos_5,
+                                    total_income_pos_6, total_income_pos_7, total_income_pos_8, total_income_pos_9, total_income_pos_10
+                                ], spacing=6, wrap=True),
+                                ft.Row([
+                                    total_tax_pos_1, total_tax_pos_2, total_tax_pos_3, total_tax_pos_4,
+                                    total_tax_pos_5, total_tax_pos_6, total_tax_pos_7, total_tax_pos_8
+                                ], spacing=6, wrap=True),
                                 total_tax_text
                             ], spacing=10),
                             padding=10
@@ -8018,7 +9014,7 @@ def main(page: ft.Page):
     
     # Create navigation rail (add Import/Backup)
     nav_rail = ft.NavigationRail(
-        selected_index=0,
+        selected_index=2,
         label_type=ft.NavigationRailLabelType.ALL,
         min_width=100,
         min_extended_width=200,
@@ -8080,7 +9076,7 @@ def main(page: ft.Page):
     
     # Content area
     content_area = ft.Container(
-        content=create_dashboard_tab(),
+        content=create_all_data_tab(),
         expand=True
     )
     
