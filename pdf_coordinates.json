@@ -50,8 +50,8 @@
     "size": 10
   },
   "income_1_tax": {
-    "x": 810,
-    "y": 535,
+    "x": 400,
+    "y": 900,
     "size": 10
   },
   "income_2_amount": {
@@ -111,52 +111,182 @@
   },
   "card_number_1": {
     "x": 380,
-    "y": 750,
+    "y": 850,
     "size": 10
   },
   "card_number_2": {
     "x": 395,
-    "y": 750,
+    "y": 850,
     "size": 10
   },
   "card_number_3": {
-    "x": 450,
-    "y": 750,
+    "x": 400,
+    "y": 850,
     "size": 10
   },
   "card_number_4": {
     "x": 515,
-    "y": 750,
+    "y": 850,
     "size": 10
   },
   "card_number_5": {
     "x": 550,
-    "y": 750,
+    "y": 850,
     "size": 10
   },
   "card_number_6": {
     "x": 380,
-    "y": 680,
+    "y": 880,
     "size": 10
   },
   "card_number_7": {
     "x": 395,
-    "y": 680,
+    "y": 880,
     "size": 10
   },
   "card_number_8": {
     "x": 450,
-    "y": 680,
+    "y": 880,
     "size": 10
   },
   "card_number_9": {
     "x": 515,
-    "y": 680,
+    "y": 880,
     "size": 10
   },
   "card_number_10": {
     "x": 550,
+    "y": 880,
+    "size": 10
+  },
+  "withholdee_id_1": {
+    "x": 380,
     "y": 680,
+    "size": 10
+  },
+  "withholdee_id_2": {
+    "x": 397,
+    "y": 680,
+    "size": 10
+  },
+  "withholdee_id_3": {
+    "x": 407,
+    "y": 680,
+    "size": 10
+  },
+  "withholdee_id_4": {
+    "x": 417,
+    "y": 680,
+    "size": 10
+  },
+  "withholdee_id_5": {
+    "x": 434,
+    "y": 680,
+    "size": 10
+  },
+  "withholdee_id_6": {
+    "x": 430,
+    "y": 680,
+    "size": 10
+  },
+  "withholdee_id_7": {
+    "x": 455,
+    "y": 680,
+    "size": 10
+  },
+  "withholdee_id_8": {
+    "x": 440,
+    "y": 680,
+    "size": 10
+  },
+  "withholdee_id_9": {
+    "x": 445,
+    "y": 680,
+    "size": 10
+  },
+  "withholdee_id_10": {
+    "x": 450,
+    "y": 680,
+    "size": 10
+  },
+  "withholdee_id_11": {
+    "x": 455,
+    "y": 680,
+    "size": 10
+  },
+  "withholdee_id_12": {
+    "x": 460,
+    "y": 680,
+    "size": 10
+  },
+  "withholdee_id_13": {
+    "x": 470,
+    "y": 680,
+    "size": 10
+  },
+  "withholder_id_1": {
+    "x": 380,
+    "y": 750,
+    "size": 10
+  },
+  "withholder_id_2": {
+    "x": 395,
+    "y": 750,
+    "size": 10
+  },
+  "withholder_id_3": {
+    "x": 400,
+    "y": 750,
+    "size": 10
+  },
+  "withholder_id_4": {
+    "x": 405,
+    "y": 750,
+    "size": 10
+  },
+  "withholder_id_5": {
+    "x": 464,
+    "y": 750,
+    "size": 10
+  },
+  "withholder_id_6": {
+    "x": 400,
+    "y": 750,
+    "size": 10
+  },
+  "withholder_id_7": {
+    "x": 436,
+    "y": 750,
+    "size": 10
+  },
+  "withholder_id_8": {
+    "x": 472,
+    "y": 750,
+    "size": 10
+  },
+  "withholder_id_9": {
+    "x": 408,
+    "y": 750,
+    "size": 10
+  },
+  "withholder_id_10": {
+    "x": 444,
+    "y": 750,
+    "size": 10
+  },
+  "withholder_id_11": {
+    "x": 480,
+    "y": 750,
+    "size": 10
+  },
+  "withholder_id_12": {
+    "x": 516,
+    "y": 750,
+    "size": 10
+  },
+  "withholder_id_13": {
+    "x": 552,
+    "y": 750,
     "size": 10
   },
   "salary_pos_1": {

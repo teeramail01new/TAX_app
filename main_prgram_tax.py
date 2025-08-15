@@ -2074,7 +2074,8 @@ def main(page: ft.Page):
 
     # Full data grid
     def create_full_data_grid():
-        nonlocal row_checkboxes, selected_transfer_id_for_pdf
+        global selected_transfer_id_for_pdf
+        nonlocal row_checkboxes
         records = app.get_all_records()
 
         def update_remark(rec_id: int, new_value) -> bool:
@@ -2137,7 +2138,7 @@ def main(page: ft.Page):
         row_checkboxes.clear()
         def make_on_change(rec_id: int):
             def _handler(e):
-                nonlocal selected_transfer_id_for_pdf
+                global selected_transfer_id_for_pdf
                 # Uncheck all others
                 for rid, c in row_checkboxes.items():
                     if rid != rec_id and c.value:
@@ -2283,7 +2284,7 @@ def main(page: ft.Page):
                 if res.files:
                     ok, msg, count = app.import_from_excel(res.files[0].path)
                     import_status.value = ("✅ " if ok else "❌ ") + msg
-                    import_status.color = ft.colors.GREEN_700 if ok else ft.colors.RED_700
+                    import_status.color = ft.Colors.GREEN_700 if ok else ft.Colors.RED_700
                     # Also export current data to source table so next startup auto-fills from it
                     try:
                         sok, smsg = app.export_to_source_table()
@@ -2319,7 +2320,7 @@ def main(page: ft.Page):
         def do_backup(e):
             ok, msg, count = app.backup_to_sqlite(filename.value or 'backup.db')
             backup_status.value = ("✅ " if ok else "❌ ") + msg + (f" | {count} rows" if ok else "")
-            backup_status.color = ft.colors.GREEN_700 if ok else ft.colors.RED_700
+            backup_status.color = ft.Colors.GREEN_700 if ok else ft.Colors.RED_700
             page.update()
 
         return ft.Container(
@@ -2336,7 +2337,7 @@ def main(page: ft.Page):
     pending_withholder_import_data = None  # payload passed into crystal report tab
     def create_import_withholder_excel_tab():
         status = ft.Text("", size=12)
-        info_text = ft.Text("ไฟล์ต้นทาง: C:\\program_tax\\tax_address.xlsx", size=12, color=ft.colors.GREY_700)
+        info_text = ft.Text("ไฟล์ต้นทาง: C:\\program_tax\\tax_address.xlsx", size=12, color=ft.Colors.GREY_700)
 
         # Grid state
         current_columns: list[str] = []
@@ -2360,6 +2361,8 @@ def main(page: ft.Page):
                 return False
             try:
                 cur = conn.cursor()
+                
+                # Create main table
                 cur.execute(
                     f"""
                     CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
@@ -2370,15 +2373,40 @@ def main(page: ft.Page):
                     CREATE INDEX IF NOT EXISTS idx_{TABLE_NAME}_created_at ON {TABLE_NAME}(created_at DESC);
                     """
                 )
+                
+                # Create settings table for storing checkbox states
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS withholder_settings (
+                        id SERIAL PRIMARY KEY,
+                        setting_key VARCHAR(100) NOT NULL,
+                        setting_value JSONB NOT NULL,
+                        updated_at TIMESTAMPTZ DEFAULT now()
+                    );
+                    """)
+                
+                # Create index for settings table
+                try:
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_withholder_settings_key ON withholder_settings(setting_key);")
+                except Exception:
+                    pass  # Index might already exist
+                
                 conn.commit()
+                print("✅ Tables ensured successfully")
                 return True
+                
             except Exception as ex:
-                print(f"Ensure table error: {ex}")
-                conn.rollback()
+                print(f"❌ Ensure table error: {ex}")
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
                 return False
             finally:
                 try:
-                    cur.close(); conn.close()
+                    if 'cur' in locals():
+                        cur.close()
+                    if 'conn' in locals():
+                        conn.close()
                 except Exception:
                     pass
 
@@ -2450,8 +2478,14 @@ def main(page: ft.Page):
             # Save items to state
             nonlocal data_items, row_selection
             data_items = items
-            # Ensure selection dict size
-            row_selection = {i: row_selection.get(i, False) for i in range(len(data_items))}
+            
+            # Ensure selection dict size and preserve saved states
+            new_row_selection = {}
+            for i in range(len(data_items)):
+                # Preserve existing selection state if available
+                new_row_selection[i] = row_selection.get(i, False)
+            row_selection = new_row_selection
+            
             if cols:
                 current_columns = cols
             # Build columns
@@ -2459,7 +2493,7 @@ def main(page: ft.Page):
             # Build rows
             rows = []
             for idx, item in enumerate(data_items, start=1):
-                # selection checkbox
+                # selection checkbox - ใช้สถานะที่บันทึกไว้
                 def make_on_change(i: int):
                     return lambda e: row_selection.__setitem__(i, bool(e.control.value))
                 checkbox = ft.Checkbox(value=row_selection.get(idx-1, False), on_change=make_on_change(idx-1))
@@ -2474,7 +2508,7 @@ def main(page: ft.Page):
         def import_now(e):
             ok, msg, cnt, cols = import_fixed_excel(r"C:\\program_tax\\tax_address.xlsx")
             status.value = ("✅ " if ok else "❌ ") + msg
-            status.color = ft.colors.GREEN_700 if ok else ft.colors.RED_700
+            status.color = ft.Colors.GREEN_700 if ok else ft.Colors.RED_700
             if ok and cols:
                 # Update current columns to what we saw in file
                 nonlocal current_columns
@@ -2504,84 +2538,430 @@ def main(page: ft.Page):
             selected_indices = [i for i, sel in row_selection.items() if sel]
             if not selected_indices:
                 status.value = "❌ กรุณาเลือกรายการ"
-                status.color = ft.colors.RED_700
+                status.color = ft.Colors.RED_700
                 page.update(); return
             idx0 = selected_indices[0]
-            if idx0 < 0 or idx0 >= len(data_items):
+            if idx0 < idx0 >= len(data_items):
                 status.value = "❌ รายการไม่ถูกต้อง"
-                status.color = ft.colors.RED_700
+                status.color = ft.Colors.RED_700
                 page.update(); return
             payload = map_withholder_fields(data_items[idx0])
             nonlocal pending_withholder_import_data
             pending_withholder_import_data = payload
             # Switch to crystal report tab
             try:
-                nav_rail.selected_index = 6
-                handle_nav_change(6)
-                status.value = "✅ ส่งข้อมูลไปยัง Crystal Report แล้ว"
-                status.color = ft.colors.GREEN_700
+                nav_rail.selected_index = 1
+                handle_nav_change(1)
+                status.value = "✅ ส่งข้อมูลไปยัง ระบบพิกัด form PDF แล้ว"
+                status.color = ft.Colors.GREEN_700
                 page.update()
             except Exception as ex:
-                status.value = f"❌ ไม่สามารถเปิดแท็บ Crystal Report: {ex}"
-                status.color = ft.colors.RED_700
+                status.value = f"❌ ไม่สามารถเปิดแท็บ ระบบพิกัด form PDF: {ex}"
+                status.color = ft.Colors.RED_700
                 page.update()
+
+        def send_selected_to_pdf(e):
+            # Collect first selected row
+            selected_indices = [i for i, sel in row_selection.items() if sel]
+            if not selected_indices:
+                status.value = "❌ กรุณาเลือกรายการ"
+                status.color = ft.Colors.RED_700
+                page.update(); return
+            idx0 = selected_indices[0]
+            if idx0 < 0 or idx0 >= len(data_items):
+                status.value = "❌ รายการไม่ถูกต้อง"
+                status.color = ft.Colors.RED_700
+                page.update(); return
+            payload = map_withholder_fields(data_items[idx0])
+            nonlocal pending_withholder_import_data
+            pending_withholder_import_data = payload
+            # Switch to PDF tab (tax form tab)
+            try:
+                nav_rail.selected_index = 5
+                handle_nav_change(5)
+                status.value = "✅ ส่งข้อมูลไปยัง ฟอร์มภาษี แล้ว"
+                status.color = ft.Colors.GREEN_700
+                page.update()
+            except Exception as ex:
+                status.value = f"❌ ไม่สามารถเปิดแท็บ ฟอร์มภาษี: {ex}"
+                status.color = ft.Colors.RED_700
+                page.update()
+
+        def save_settings(e):
+            """บันทึกการตั้งค่า checkbox states และข้อมูลผู้หักภาษีที่เลือก"""
+            conn = get_conn()
+            if not conn:
+                status.value = "❌ เชื่อมต่อฐานข้อมูลไม่สำเร็จ"
+                status.color = ft.Colors.RED_700
+                page.update(); return
+            
+            try:
+                cur = conn.cursor()
+                
+                # Collect selected items
+                selected_indices = [i for i, sel in row_selection.items() if sel]
+                if not selected_indices:
+                    status.value = "❌ กรุณาเลือกรายการที่ต้องการบันทึก"
+                    status.color = ft.Colors.RED_700
+                    page.update(); return
+                
+                # Get first selected item
+                idx0 = selected_indices[0]
+                if idx0 < 0 or idx0 >= len(data_items):
+                    status.value = "❌ รายการไม่ถูกต้อง"
+                    status.color = ft.Colors.RED_700
+                    page.update(); return
+                
+                # Map to withholder fields
+                withholder_data = map_withholder_fields(data_items[idx0])
+                
+                # Save checkbox states
+                checkbox_states = {
+                    "row_selection": row_selection,
+                    "selected_withholder": withholder_data,
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+                # Convert to JSON string for compatibility
+                import json
+                checkbox_states_json = json.dumps(checkbox_states)
+                
+                # Delete old settings first, then insert new ones
+                cur.execute("DELETE FROM withholder_settings WHERE setting_key = 'checkbox_states'")
+                
+                # Insert new settings
+                cur.execute("""
+                    INSERT INTO withholder_settings (setting_key, setting_value) 
+                    VALUES ('checkbox_states', %s::jsonb)
+                    """, (checkbox_states_json,))
+                
+                conn.commit()
+                
+                # แสดงข้อมูลที่บันทึกได้ชัดเจนขึ้น
+                withholder_name = withholder_data.get('withholder_name', 'N/A')
+                status.value = f"✅ บันทึกการตั้งค่าเรียบร้อยแล้ว - ผู้หักภาษี: {withholder_name}"
+                status.color = ft.Colors.GREEN_700
+                page.update()
+                
+                print(f"✅ Settings saved successfully: {withholder_name}")
+                
+            except Exception as ex:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                status.value = f"❌ บันทึกการตั้งค่าไม่สำเร็จ: {ex}"
+                status.color = ft.Colors.RED_700
+                page.update()
+                print(f"❌ Save settings error: {ex}")
+            finally:
+                try:
+                    if 'cur' in locals():
+                        cur.close()
+                    if 'conn' in locals():
+                        conn.close()
+                except Exception:
+                    pass
+
+        def load_settings(e):
+            """โหลดการตั้งค่าที่บันทึกไว้"""
+            conn = get_conn()
+            if not conn:
+                status.value = "❌ เชื่อมต่อฐานข้อมูลไม่สำเร็จ"
+                status.color = ft.Colors.RED_700
+                page.update(); return
+            
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT setting_value FROM withholder_settings WHERE setting_key = 'checkbox_states'")
+                result = cur.fetchone()
+                
+                if result:
+                    settings = result[0]
+                    # Restore checkbox states
+                    nonlocal row_selection
+                    row_selection = settings.get("row_selection", {})
+                    
+                    # แสดงข้อมูลการตั้งค่าที่โหลดมา
+                    withholder_data = settings.get("selected_withholder", {})
+                    if withholder_data:
+                        status.value = f"✅ โหลดการตั้งค่าเรียบร้อยแล้ว - ผู้หักภาษี: {withholder_data.get('withholder_name', 'N/A')}"
+                    else:
+                        status.value = "✅ โหลดการตั้งค่าเรียบร้อยแล้ว"
+                    status.color = ft.Colors.GREEN_700
+                    
+                    # Update grid to reflect restored states
+                    refresh_grid()
+                    
+                    # แสดงข้อมูลเพิ่มเติมเกี่ยวกับการตั้งค่าที่โหลดมา
+                    selected_count = sum(1 for sel in row_selection.values() if sel)
+                    if selected_count > 0:
+                        status.value += f" (เลือก {selected_count} รายการ)"
+                        page.update()
+                    
+                else:
+                    status.value = "ℹ️ ไม่พบการตั้งค่าที่บันทึกไว้"
+                    status.color = ft.Colors.BLUE_700
+                    page.update()
+                    
+            except Exception as ex:
+                status.value = f"❌ โหลดการตั้งค่าไม่สำเร็จ: {ex}"
+                status.color = ft.Colors.RED_700
+                page.update()
+                print(f"❌ Load settings error: {ex}")
+            finally:
+                try:
+                    if 'cur' in locals():
+                        cur.close()
+                    if 'conn' in locals():
+                        conn.close()
+                except Exception:
+                    pass
 
         # Initial load
         ensure_table()
         refresh_grid()
+        
+        # Auto-load saved settings on startup
+        def auto_load_settings():
+            """โหลดการตั้งค่าที่บันทึกไว้เมื่อเริ่มโปรแกรม"""
+            try:
+                conn = get_conn()
+                if not conn:
+                    return
+                
+                cur = conn.cursor()
+                cur.execute("SELECT setting_value FROM withholder_settings WHERE setting_key = 'checkbox_states'")
+                result = cur.fetchone()
+                
+                if result:
+                    settings = result[0]
+                    # Restore checkbox states
+                    nonlocal row_selection
+                    row_selection = settings.get("row_selection", {})
+                    
+                    # Update grid to reflect restored states
+                    refresh_grid()
+                    
+                    # Update status with more detailed information
+                    withholder_data = settings.get("selected_withholder", {})
+                    selected_count = sum(1 for sel in row_selection.values() if sel)
+                    
+                    if withholder_data:
+                        status.value = f"✅ โหลดการตั้งค่าที่บันทึกไว้แล้ว - ผู้หักภาษี: {withholder_data.get('withholder_name', 'N/A')} (เลือก {selected_count} รายการ)"
+                    else:
+                        status.value = f"✅ โหลดการตั้งค่าที่บันทึกไว้แล้ว (เลือก {selected_count} รายการ)"
+                    status.color = ft.Colors.GREEN_700
+                    
+                    print(f"✅ Auto-loaded settings: {selected_count} items selected")
+                    
+            except Exception as ex:
+                print(f"❌ Auto-load settings error: {ex}")
+            finally:
+                try:
+                    if 'cur' in locals():
+                        cur.close()
+                    if 'conn' in locals():
+                        conn.close()
+                except Exception:
+                    pass
+        
+        # Run auto-load after a short delay to ensure UI is ready
+        import threading
+        def delayed_auto_load():
+            import time
+            time.sleep(0.5)  # Wait for UI to be ready
+            auto_load_settings()
+        
+        threading.Thread(target=delayed_auto_load, daemon=True).start()
 
         def clear_all_data(e):
             conn = get_conn()
             if not conn:
                 status.value = "❌ เชื่อมต่อฐานข้อมูลไม่สำเร็จ"
-                status.color = ft.colors.RED_700
+                status.color = ft.Colors.RED_700
                 page.update(); return
             try:
                 cur = conn.cursor()
                 cur.execute(f"TRUNCATE TABLE {TABLE_NAME}")
                 conn.commit()
                 status.value = "✅ ลบข้อมูลทั้งหมดแล้ว"
-                status.color = ft.colors.GREEN_700
+                status.color = ft.Colors.GREEN_700
                 refresh_grid()
             except Exception as ex:
-                conn.rollback()
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
                 status.value = f"❌ ลบข้อมูลไม่สำเร็จ: {ex}"
-                status.color = ft.colors.RED_700
+                status.color = ft.Colors.RED_700
                 page.update()
             finally:
                 try:
-                    cur.close(); conn.close()
+                    if 'cur' in locals():
+                        cur.close()
+                    if 'conn' in locals():
+                        conn.close()
                 except Exception:
                     pass
 
+        def clear_settings(e):
+            """ล้างการตั้งค่าทั้งหมด"""
+            conn = get_conn()
+            if not conn:
+                status.value = "❌ เชื่อมต่อฐานข้อมูลไม่สำเร็จ"
+                status.color = ft.Colors.RED_700
+                page.update(); return
+            try:
+                cur = conn.cursor()
+                cur.execute("DELETE FROM withholder_settings WHERE setting_key = 'checkbox_states'")
+                conn.commit()
+                
+                # Clear local selection state
+                nonlocal row_selection
+                row_selection.clear()
+                
+                status.value = "✅ ล้างการตั้งค่าเรียบร้อยแล้ว"
+                status.color = ft.Colors.GREEN_700
+                refresh_grid()
+                page.update()
+                
+            except Exception as ex:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                status.value = f"❌ ล้างการตั้งค่าไม่สำเร็จ: {ex}"
+                status.color = ft.Colors.RED_700
+                page.update()
+            finally:
+                try:
+                    if 'cur' in locals():
+                        cur.close()
+                    if 'conn' in locals():
+                        conn.close()
+                except Exception:
+                    pass
+
+        def show_current_selection_status(e):
+            """แสดงสถานะปัจจุบันของการเลือกใน datagridview"""
+            selected_count = sum(1 for sel in row_selection.values() if sel)
+            total_count = len(data_items)
+            
+            if selected_count > 0:
+                selected_indices = [i for i, sel in row_selection.items() if sel]
+                status.value = f"📊 สถานะปัจจุบัน: เลือก {selected_count}/{total_count} รายการ (แถว: {', '.join(map(str, [i+1 for i in selected_indices]))})"
+                status.color = ft.Colors.BLUE_700
+            else:
+                status.value = f"📊 สถานะปัจจุบัน: ไม่ได้เลือกรายการใดๆ ({total_count} รายการทั้งหมด)"
+                status.color = ft.Colors.GREY_700
+            
+            page.update()
+
         return ft.Container(
             content=ft.Column([
-                ft.Text("นำเข้าผู้หักภาษีจาก Excel", size=22, weight=ft.FontWeight.BOLD),
+                ft.Text("ระบบตั้งค่าหัวกระดาษ", size=22, weight=ft.FontWeight.BOLD),
                 info_text,
+                
+                # Main action buttons
                 ft.Row([
                     ft.ElevatedButton("นำเข้าจาก tax_address.xlsx", icon=ft.icons.FILE_UPLOAD, on_click=import_now),
                     ft.ElevatedButton("รีเฟรช", icon=ft.icons.REFRESH, on_click=lambda e: refresh_grid()),
                     ft.ElevatedButton("ล้างข้อมูล", icon=ft.icons.DELETE, on_click=clear_all_data,
-                                      style=ft.ButtonStyle(bgcolor=ft.colors.RED_700, color=ft.colors.WHITE)),
+                                      style=ft.ButtonStyle(bgcolor=ft.Colors.RED_700, color=ft.Colors.WHITE)),
                     ft.ElevatedButton("นำข้อมูลไปเติมใน Crystal Report", icon=ft.icons.ARROW_FORWARD, on_click=send_selected_to_crystal,
-                                      style=ft.ButtonStyle(bgcolor=ft.colors.GREEN_700, color=ft.colors.WHITE)),
+                                      style=ft.ButtonStyle(bgcolor=ft.Colors.GREEN_700, color=ft.Colors.WHITE)),
                 ], spacing=10, wrap=True),
-                status,
+                
+                # Settings management buttons
                 ft.Container(
-                    content=ft.Column([data_table], scroll=ft.ScrollMode.AUTO),
-                    height=420, padding=10, bgcolor=ft.colors.GREY_50, border_radius=8
+                    content=ft.Column([
+                        ft.Text("การจัดการการตั้งค่า", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.BLUE_700),
+                        ft.Row([
+                            ft.ElevatedButton(
+                                "💾 บันทึกการตั้งค่า", 
+                                icon=ft.icons.SAVE, 
+                                on_click=save_settings,
+                                style=ft.ButtonStyle(bgcolor=ft.Colors.GREEN_700, color=ft.Colors.WHITE),
+                                width=180
+                            ),
+                            ft.ElevatedButton(
+                                "📂 โหลดการตั้งค่า", 
+                                icon=ft.icons.FOLDER_OPEN, 
+                                on_click=load_settings,
+                                style=ft.ButtonStyle(bgcolor=ft.Colors.BLUE_700, color=ft.Colors.WHITE),
+                                width=180
+                            ),
+                            ft.ElevatedButton(
+                                "🗑️ ล้างการตั้งค่า", 
+                                icon=ft.icons.DELETE_SWEEP, 
+                                on_click=clear_settings,
+                                style=ft.ButtonStyle(bgcolor=ft.Colors.RED_700, color=ft.Colors.WHITE),
+                                width=180
+                            ),
+                        ], spacing=15, alignment=ft.MainAxisAlignment.CENTER),
+                        ft.Row([
+                            ft.ElevatedButton(
+                                "📊 แสดงสถานะปัจจุบัน", 
+                                icon=ft.icons.INFO_OUTLINE, 
+                                on_click=show_current_selection_status,
+                                style=ft.ButtonStyle(bgcolor=ft.Colors.INDIGO_700, color=ft.Colors.WHITE),
+                                width=200
+                            ),
+                        ], alignment=ft.MainAxisAlignment.CENTER),
+                        ft.Text("เลือกข้อมูลผู้หักภาษีที่ต้องการ แล้วกดบันทึกการตั้งค่า", 
+                               size=12, color=ft.Colors.GREY_600, text_align=ft.TextAlign.CENTER)
+                    ], spacing=10),
+                    bgcolor=ft.Colors.BLUE_50,
+                    border_radius=10,
+                    padding=15,
+                    margin=ft.margin.only(bottom=15)
                 ),
+                
+                status,
+                
+                # Data table with scrollbar
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("ข้อมูลผู้หักภาษี", size=14, weight=ft.FontWeight.BOLD, color=ft.Colors.GREY_700),
+                        ft.Container(
+                            content=ft.Column([
+                                data_table
+                            ], scroll=ft.ScrollMode.AUTO, height=400, spacing=0, expand=True),
+                            border=ft.border.all(1, ft.Colors.GREY_300),
+                            border_radius=5,
+                            padding=10,
+                            expand=True
+                        )
+                    ], spacing=10, expand=True),
+                    padding=15, bgcolor=ft.Colors.GREY_50, border_radius=8,
+                    expand=True
+                ),
+                
+                # Action buttons for PDF
                 ft.Row([
                     ft.ElevatedButton(
-                        "เลือกรายการเพื่อกรอกลง pdf ไป",
-                        icon=ft.icons.CHECK_CIRCLE,
+                        "นำข้อมูลไปเติมใน Crystal Report", 
+                        icon=ft.icons.ARROW_FORWARD, 
                         on_click=send_selected_to_crystal,
-                        style=ft.ButtonStyle(bgcolor=ft.colors.BLUE_700, color=ft.colors.WHITE)
+                        style=ft.ButtonStyle(bgcolor=ft.Colors.GREEN_700, color=ft.Colors.WHITE),
+                        width=250
+                    ),
+                    ft.ElevatedButton(
+                        "นำข้อมูลไปเติมใน PDF", 
+                        icon=ft.icons.PICTURE_AS_PDF, 
+                        on_click=send_selected_to_pdf,
+                        style=ft.ButtonStyle(bgcolor=ft.Colors.BLUE_700, color=ft.Colors.WHITE),
+                        width=250
                     )
-                ], alignment=ft.MainAxisAlignment.START)
+                ], spacing=15, alignment=ft.MainAxisAlignment.CENTER)
             ], spacing=12),
             padding=20,
         )
+
+
+
+
 
     # Export Excel function
     def export_excel_clicked(e):
@@ -2669,10 +3049,10 @@ def main(page: ft.Page):
         try:
             ok, msg, cnt = app.reset_from_excel(r"C:\\program_tax\\transfer_records_update.xlsx")
             status_text.value = ("✅ " if ok else "❌ ") + msg
-            status_text.color = ft.colors.GREEN_700 if ok else ft.colors.RED_700
+            status_text.color = ft.Colors.GREEN_700 if ok else ft.Colors.RED_700
         except Exception as ex:
             status_text.value = f"❌ รีเซ็ตไม่สำเร็จ: {ex}"
-            status_text.color = ft.colors.RED_700
+            status_text.color = ft.Colors.RED_700
 
         new_stats = app.get_statistics()
         # Update statistics cards
@@ -2724,7 +3104,7 @@ def main(page: ft.Page):
     # CRUD Event Handlers
     def dashboard_load_selected_clicked(e):
         try:
-            nonlocal selected_transfer_id_for_pdf
+            global selected_transfer_id_for_pdf
             if not selected_transfer_id_for_pdf:
                 status_text.value = "❌ กรุณาเลือกแถวจากตารางก่อน"
                 status_text.color = ft.Colors.RED_700
@@ -2990,7 +3370,7 @@ def main(page: ft.Page):
     # Create tab content functions
     def create_dashboard_tab():
         def set_selected_for_pdf(e=None):
-            nonlocal selected_transfer_id_for_pdf
+            global selected_transfer_id_for_pdf
             # Choose the first checked row; if none, clear selection
             chosen = None
             for rec_id, cb in row_checkboxes.items():
@@ -3003,14 +3383,254 @@ def main(page: ft.Page):
             except:
                 pass
 
+        def send_selected_to_crystal_from_dashboard(e):
+            """ส่งข้อมูลที่เลือกจาก Dashboard ไปยัง Crystal Report tab - วิธีใหม่ที่ง่ายกว่า"""
+            # Import required modules
+            import json
+            import os
+            import traceback
+            
+            try:
+                print(f"🚀 send_selected_to_crystal_from_dashboard called - วิธีใหม่")
+                
+                # วิธีใหม่: หา checkbox ที่ถูกเลือกโดยตรงจาก row_checkboxes
+                selected_id = None
+                for rec_id, cb in row_checkboxes.items():
+                    if cb.value:
+                        selected_id = rec_id
+                        break
+                
+                if not selected_id:
+                    print("⚠️ No row selected - ไม่มี checkbox ที่ถูกเลือก")
+                    # Show error dialog
+                    def close_dialog(e):
+                        dialog.open = False
+                        page.update()
+                    
+                    dialog = ft.AlertDialog(
+                        title=ft.Text("⚠️ ไม่มีรายการที่เลือก"),
+                        content=ft.Text("กรุณาเลือกรายการที่ต้องการในตารางด้านบนก่อน"),
+                        actions=[ft.TextButton("ตกลง", on_click=close_dialog)]
+                    )
+                    page.dialog = dialog
+                    dialog.open = True
+                    page.update()
+                    return
+                
+                print(f"✅ Row selected: {selected_id}")
+                
+                # วิธีใหม่: ใช้ข้อมูลจาก records ที่มีอยู่แล้วใน create_full_data_grid
+                # เราไม่ต้องเรียก app.get_record_by_id อีกต่อไป
+                records = app.get_all_records()
+                selected_record = None
+                for record in records:
+                    if record[0] == selected_id:
+                        selected_record = record
+                        break
+                
+                if not selected_record:
+                    print("❌ No record found in local records")
+                    return
+                
+                print(f"📊 Selected record: {selected_record}")
+                
+                # Map the data to withholder format (selected_record is a tuple)
+                withholder_data = {
+                    'withholder_name': f"{selected_record[1] or ''} {selected_record[2] or ''}".strip(),
+                    'withholder_address': selected_record[6] or '',
+                    'withholder_tax_id': selected_record[5] or '',
+                    'transfer_amount': selected_record[3] or 0,
+                    'transfer_date': selected_record[4] or '',
+                    'remark': selected_record[10] if len(selected_record) > 10 else ''
+                }
+                print(f"📦 Mapped withholder_data: {withholder_data}")
+                
+                # วิธีใหม่: ส่งข้อมูลผ่าน global variable ที่ง่ายกว่า
+                # ใช้ชื่อที่ชัดเจนเพื่อหลีกเลี่ยงการชนกัน
+                globals()['dashboard_to_crystal_data'] = withholder_data
+                backup_data = globals().get('dashboard_to_crystal_data', None)
+                if backup_data:
+                    print(f"✅ Successfully stored withholder_data in globals: {backup_data}")
+                else:
+                    print("❌ Failed to store withholder_data in globals")
+                
+                # วิธีใหม่: ส่งข้อมูลผ่าน file system (ง่ายและเสถียร)
+                # เพิ่มข้อมูล transfer record สำหรับ withholdee fields
+                complete_data = {
+                    'withholder_name': withholder_data['withholder_name'],
+                    'withholder_address': withholder_data['withholder_address'],
+                    'withholder_tax_id': withholder_data['withholder_tax_id'],
+                    'transfer_record': {
+                        'id': selected_record[0],
+                        'name': selected_record[1] or '',
+                        'surname': selected_record[2] or '',
+                        # Convert Decimal to float to make it JSON-serializable
+                        'transfer_amount': float(selected_record[3] or 0),
+                        'transfer_date': selected_record[4] or '',
+                        'id_card': selected_record[5] or '',
+                        'address': selected_record[6] or '',
+                        'percent': float(selected_record[7]) if len(selected_record) > 7 and selected_record[7] is not None else 0.0,
+                        'total_amount': float(selected_record[8]) if len(selected_record) > 8 and selected_record[8] is not None else 0.0,
+                        'fee': float(selected_record[9]) if len(selected_record) > 9 and selected_record[9] is not None else 0.0,
+                        'remark': str(selected_record[10]) if len(selected_record) > 10 and selected_record[10] is not None else ''
+                    }
+                }
+
+                temp_file_path = os.path.join(os.getcwd(), "temp_dashboard_data.json")
+                try:
+                    # Write atomically to avoid truncated/corrupted temp files
+                    tmp_path = temp_file_path + ".tmp"
+                    def _json_default(o):
+                        from decimal import Decimal as _Dec
+                        from datetime import datetime as _Dt
+                        if isinstance(o, _Dec):
+                            return float(o)
+                        if isinstance(o, _Dt):
+                            return o.isoformat()
+                        return str(o)
+                    with open(tmp_path, 'w', encoding='utf-8') as f:
+                        json.dump(complete_data, f, ensure_ascii=False, indent=2, default=_json_default)
+                    os.replace(tmp_path, temp_file_path)
+                    print(f"💾 Successfully saved complete data to temp file: {temp_file_path}")
+                    print(f"📄 File content: {complete_data}")
+                except Exception as file_ex:
+                    print(f"❌ Failed to save to temp file: {file_ex}")
+                    try:
+                        if 'tmp_path' in locals() and os.path.exists(tmp_path):
+                            os.remove(tmp_path)
+                    except Exception:
+                        pass
+                
+                # Switch to Crystal Report tab
+                print(f"🔄 Setting nav_rail.selected_index to 1")
+                nav_rail.selected_index = 1
+                print(f"🔄 Calling handle_nav_change(1)")
+                handle_nav_change(1)
+                print(f"🔄 Switched to Crystal Report tab (index 1)")
+                
+                # Show success dialog
+                def close_dialog(e):
+                    dialog.open = False
+                    page.update()
+                
+                dialog = ft.AlertDialog(
+                    title=ft.Text("✅ สำเร็จ"),
+                    content=ft.Text(f"ส่งข้อมูลไปยัง Crystal Report แล้ว\nผู้หักภาษี: {withholder_data['withholder_name']}\nระบบจะเปลี่ยนไปยัง tab 'ระบบพิกัด form PDF' อัตโนมัติ"),
+                    actions=[ft.TextButton("ตกลง", on_click=close_dialog)]
+                )
+                page.dialog = dialog
+                dialog.open = True
+                page.update()
+                
+            except Exception as ex:
+                print(f"❌ Exception in send_selected_to_crystal_from_dashboard: {ex}")
+                traceback.print_exc()
+                # Show error dialog
+                def close_dialog(e):
+                    dialog.open = False
+                    page.update()
+                
+                dialog = ft.AlertDialog(
+                    title=ft.Text("❌ เกิดข้อผิดพลาด"),
+                    content=ft.Text(f"ไม่สามารถส่งข้อมูลไปยัง Crystal Report ได้\n{str(ex)}"),
+                    actions=[ft.TextButton("ตกลง", on_click=close_dialog)]
+                )
+                page.dialog = dialog
+                dialog.open = True
+                page.update()
+                print(f"❌ Send to Crystal Report error: {ex}")
+
+
+
+        def autofill_from_selection(e):
+            """ส่งข้อมูลรายการที่เลือกไปเติมในแท็บ 'ระบบพิกัด form PDF' (ผู้ถูกหักภาษี) โดยไม่แสดง modal"""
+            try:
+                # 1) Find selected record
+                selected_id = None
+                for rec_id, cb in row_checkboxes.items():
+                    if cb.value:
+                        selected_id = rec_id
+                        break
+                if not selected_id:
+                    status_text.value = "❌ กรุณาเลือกแถวจากตารางก่อน"
+                    status_text.color = ft.Colors.RED_700
+                    page.update()
+                    return
+
+                # 2) Persist selection for Crystal Report tab auto-fill
+                try:
+                    global selected_transfer_id_for_pdf
+                    selected_transfer_id_for_pdf = selected_id
+                except Exception:
+                    pass
+
+                # 3) Optional: also provide dashboard data globally (withholdee only)
+                try:
+                    records = app.get_all_records()
+                    selected_record = next((r for r in records if r[0] == selected_id), None)
+                    if selected_record:
+                        withholdee_payload = {
+                            "transfer_record": {
+                                "name": selected_record[1] or "",
+                                "surname": selected_record[2] or "",
+                                "transfer_amount": float(selected_record[3] or 0),
+                                "date": selected_record[4] or "",
+                                "id_card": selected_record[5] or "",
+                                "address": selected_record[6] or "",
+                                "percent": float(selected_record[7] or 0),
+                                "total_amount": float((selected_record[8] or 0)),
+                                "fee": float((selected_record[9] or 0)),
+                            }
+                        }
+                        globals()["dashboard_to_crystal_data"] = withholdee_payload
+                except Exception:
+                    pass
+
+                # 4) Switch to 'ระบบพิกัด form PDF' tab (index 1) where auto-fill runs
+                status_text.value = f"✅ เลือก ID: {selected_id} → ส่งไปแท็บ 'ระบบพิกัด form PDF' เพื่อเติมข้อมูลผู้ถูกหักภาษี"
+                status_text.color = ft.Colors.GREEN_700
+                page.update()
+                try:
+                    handle_nav_change(1)
+                except Exception:
+                    try:
+                        content_area.content = create_crystal_report_tab()
+                        page.update()
+                    except Exception:
+                        pass
+
+                # หลังสลับแท็บ ให้เรียกเติมทุกช่องใน panel อัตโนมัติ (เหมือนกดปุ่มดึงข้อมูลที่เลือก)
+                try:
+                    import threading, time
+                    def _late_call_fill():
+                        try:
+                            time.sleep(0.6)  # รอให้แท็บสร้างเสร็จและฟังก์ชันพร้อมใน globals
+                            f = globals().get('auto_fill_from_selected_dashboard')
+                            if callable(f):
+                                f()
+                                try:
+                                    page.update()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                    threading.Thread(target=_late_call_fill, daemon=True).start()
+                except Exception:
+                    pass
+
+            except Exception as ex:
+                status_text.value = f"❌ เกิดข้อผิดพลาด: {ex}"
+                status_text.color = ft.Colors.RED_700
+                page.update()
+
         # Buttons to use selection
         selection_bar = ft.Row([
             ft.ElevatedButton(
-                text="✅ เลือกรายการเพื่อกรอก PDF",
-                icon=ft.Icons.CHECK_CIRCLE,
-                on_click=set_selected_for_pdf,
-                style=ft.ButtonStyle(bgcolor=ft.Colors.INDIGO_700, color=ft.Colors.WHITE),
-                tooltip="ใช้รายการที่เลือกเป็นแหล่งข้อมูลสำหรับกรอกลง PDF"
+                text="🚀 Autofill",
+                icon=ft.Icons.AUTO_FIX_HIGH,
+                on_click=autofill_from_selection,
+                style=ft.ButtonStyle(bgcolor=ft.Colors.GREEN_700, color=ft.Colors.WHITE),
+                tooltip="แสดงข้อมูลที่ถูกเลือกสำหรับ autofill ในฟอร์ม"
             ),
             ft.Text(lambda: f"เลือก ID: {selected_transfer_id_for_pdf}" if selected_transfer_id_for_pdf else "ยังไม่ได้เลือก",
                    size=12, color=ft.Colors.GREY_700)
@@ -3039,43 +3659,6 @@ def main(page: ft.Page):
                 
                 ft.Divider(height=30),
                 
-                # Action buttons
-                ft.Row([
-                    ft.ElevatedButton(
-                        text="📁 ส่งออกเป็นไฟล์ Excel",
-                        icon=ft.Icons.FILE_DOWNLOAD,
-                        on_click=export_excel_clicked,
-                        style=ft.ButtonStyle(
-                            bgcolor=ft.Colors.GREEN_700,
-                            color=ft.Colors.WHITE,
-                            padding=15
-                        ),
-                        width=200
-                    ),
-                    ft.ElevatedButton(
-                        text="📄 ส่งออกเป็นไฟล์ PDF",
-                        icon=ft.Icons.PICTURE_AS_PDF,
-                        on_click=export_pdf_clicked,
-                        style=ft.ButtonStyle(
-                            bgcolor=ft.Colors.RED_700,
-                            color=ft.Colors.WHITE,
-                            padding=15
-                        ),
-                        width=200
-                    ),
-                    ft.ElevatedButton(
-                        text="🔄 รีเฟรชข้อมูล",
-                        icon=ft.Icons.REFRESH,
-                        on_click=refresh_data_clicked,
-                        style=ft.ButtonStyle(
-                            bgcolor=ft.Colors.BLUE_700,
-                            color=ft.Colors.WHITE,
-                            padding=15
-                        ),
-                        width=150
-                    )
-                ], alignment=ft.MainAxisAlignment.CENTER, spacing=20),
-                
                 ft.Divider(height=30),
                 
                 # All data grid (with selection checkbox)
@@ -3089,6 +3672,21 @@ def main(page: ft.Page):
                     border=ft.border.all(1, ft.Colors.GREY_300),
                     border_radius=10,
                     padding=10
+                ),
+                
+                # Quick action info
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("🚀 การทำงานแบบอัตโนมัติ", size=14, weight=ft.FontWeight.BOLD, color=ft.Colors.PURPLE_700),
+                        ft.Text("ปุ่ม 'นำข้อมูลไปเติมใน Crystal Report' จะทำงานแบบอัตโนมัติ:", size=12, color=ft.Colors.GREY_700),
+                        ft.Text("• เปลี่ยน tab ไปยัง 'ระบบพิกัด form PDF' อัตโนมัติ", size=12, color=ft.Colors.GREEN_700),
+                        ft.Text("• เติมข้อมูลผู้หักภาษีในฟอร์มโดยอัตโนมัติ", size=12, color=ft.Colors.GREEN_700),
+                        ft.Text("• ไม่ต้องกดปุ่ม 'ดึงข้อมูลขึ้นมา' ซ้ำ", size=12, color=ft.Colors.GREEN_700)
+                    ], spacing=5),
+                    bgcolor=ft.Colors.PURPLE_50,
+                    border_radius=8,
+                    padding=15,
+                    margin=ft.margin.only(top=15, bottom=15)
                 )
                 ,
                 # Quick edit panel under the grid
@@ -3136,6 +3734,74 @@ def main(page: ft.Page):
                     bgcolor=ft.Colors.GREY_50,
                     border_radius=10,
                     padding=10
+                ),
+                
+                ft.Divider(height=30),
+                
+                # Action buttons moved to bottom
+                ft.Text("เครื่องมือเพิ่มเติม", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.GREY_700),
+                ft.Row([
+                    ft.ElevatedButton(
+                        text="📁 ส่งออกเป็นไฟล์ Excel",
+                        icon=ft.Icons.FILE_DOWNLOAD,
+                        on_click=export_excel_clicked,
+                        style=ft.ButtonStyle(
+                            bgcolor=ft.Colors.GREEN_700,
+                            color=ft.Colors.WHITE,
+                            padding=15
+                        ),
+                        width=200
+                    ),
+                    ft.ElevatedButton(
+                        text="📄 ส่งออกเป็นไฟล์ PDF",
+                        icon=ft.Icons.PICTURE_AS_PDF,
+                        on_click=export_pdf_clicked,
+                        style=ft.ButtonStyle(
+                            bgcolor=ft.Colors.RED_700,
+                            color=ft.Colors.WHITE,
+                            padding=15
+                        ),
+                        width=200
+                    ),
+                    ft.ElevatedButton(
+                        text="🔄 รีเฟรชข้อมูล",
+                        icon=ft.Icons.REFRESH,
+                        on_click=refresh_data_clicked,
+                        style=ft.ButtonStyle(
+                            bgcolor=ft.Colors.BLUE_700,
+                            color=ft.Colors.WHITE,
+                            padding=15
+                        ),
+                        width=150
+                    )
+                ], alignment=ft.MainAxisAlignment.CENTER, spacing=20),
+                
+                ft.Divider(height=20),
+                
+                # Manual PDF selection (moved from top)
+                ft.Text("เครื่องมือเพิ่มเติมสำหรับ PDF", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.INDIGO_700),
+                ft.Row([
+                    ft.ElevatedButton(
+                        text="✅ เลือกรายการเพื่อกรอก PDF",
+                        icon=ft.Icons.CHECK_CIRCLE,
+                        on_click=set_selected_for_pdf,
+                        style=ft.ButtonStyle(bgcolor=ft.Colors.INDIGO_700, color=ft.Colors.WHITE, padding=15),
+                        width=280
+                    )
+                ], alignment=ft.MainAxisAlignment.CENTER, spacing=20),
+                
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("📋 วิธีการใช้งาน (เครื่องมือเก่า):", size=14, weight=ft.FontWeight.BOLD, color=ft.Colors.INDIGO_700),
+                        ft.Text("1. เลือกรายการที่ต้องการในตารางด้านบน", size=12, color=ft.Colors.GREY_700),
+                        ft.Text("2. กดปุ่ม 'เลือกรายการเพื่อกรอก PDF' (เครื่องมือเก่า)", size=12, color=ft.Colors.GREY_700),
+                        ft.Text("3. ใช้สำหรับการทำงานแบบเดิม (ไม่มีการเปลี่ยน tab อัตโนมัติ)", size=12, color=ft.Colors.GREY_700),
+                        ft.Text("⚠️ แนะนำให้ใช้ปุ่ม 'นำข้อมูลไปเติมใน Crystal Report' แทน", size=12, color=ft.Colors.ORANGE_700, weight=ft.FontWeight.BOLD)
+                    ], spacing=5),
+                    bgcolor=ft.Colors.INDIGO_50,
+                    border_radius=8,
+                    padding=15,
+                    margin=ft.margin.only(top=10)
                 )
             ], spacing=15, scroll=ft.ScrollMode.AUTO),
             padding=20
@@ -3283,6 +3949,40 @@ def main(page: ft.Page):
     def create_tax_form_tab():
         # Initialize tax app
         tax_app = NeonTaxWithholdingApp()
+        
+        # Auto-fill withholder data from saved settings
+        def auto_fill_withholder_data():
+            """โหลดข้อมูลผู้หักภาษีที่บันทึกไว้มาเติมในฟอร์มอัตโนมัติ"""
+            global pending_withholder_import_data
+            
+            try:
+                if pending_withholder_import_data:
+                    payload = pending_withholder_import_data
+                    if payload.get('withholder_name'):
+                        withholder_name.value = payload['withholder_name']
+                    if payload.get('withholder_address'):
+                        withholder_address.value = payload['withholder_address']
+                    if payload.get('withholder_tax_id'):
+                        withholder_tax_id.value = payload['withholder_tax_id']
+                    
+                    # Clear the pending data after use
+                    pending_withholder_import_data = None
+                    
+                    print("✅ Auto-filled withholder data in tax form tab")
+                    return True
+                    
+            except Exception as ex:
+                print(f"❌ Auto-fill withholder data error: {ex}")
+            return False
+        
+        # Run auto-fill after a short delay to ensure UI is ready
+        import threading
+        def delayed_auto_fill():
+            import time
+            time.sleep(0.5)  # Wait for UI to be ready
+            auto_fill_withholder_data()
+        
+        threading.Thread(target=delayed_auto_fill, daemon=True).start()
         
         # Form fields - Withholder (ผู้มีหน้าที่หักภาษี)
         withholder_name = ft.TextField(label="ชื่อผู้มีหน้าที่หักภาษี", width=400)
@@ -3611,6 +4311,19 @@ def main(page: ft.Page):
                     ft.ElevatedButton("📋 ดูรายการ", on_click=view_tax_certificates,
                                     style=ft.ButtonStyle(bgcolor=ft.Colors.BLUE_700, color=ft.Colors.WHITE))
                 ], alignment=ft.MainAxisAlignment.CENTER, spacing=8),
+                
+                # Auto-fill status
+                ft.Container(
+                    content=ft.Row([
+                        ft.Icon(ft.Icons.INFO_OUTLINE, color=ft.Colors.BLUE_700, size=20),
+                        ft.Text("ข้อมูลผู้หักภาษีจะถูกเติมโดยอัตโนมัติเมื่อเลือกจาก Dashboard", 
+                               size=12, color=ft.Colors.BLUE_700, weight=ft.FontWeight.BOLD)
+                    ], spacing=10),
+                    bgcolor=ft.Colors.BLUE_50,
+                    border_radius=8,
+                    padding=10,
+                    margin=ft.margin.only(bottom=15)
+                ),
                 
                 status_text,
                 ft.Divider(),
@@ -4608,7 +5321,7 @@ def main(page: ft.Page):
         def build_pdf_image():
             return ft.Image(src=(pdf_preview_img or ""), fit=ft.ImageFit.CONTAIN, width=595, height=842)
         def build_pdf_path_text():
-            return ft.Text(value=f"ตำแหน่งไฟล์: {selected_pdf_path}", size=11, color=ft.colors.GREY_600)
+            return ft.Text(value=f"ตำแหน่งไฟล์: {selected_pdf_path}", size=11, color=ft.Colors.GREY_600)
         pdf_image_control = build_pdf_image()
         pdf_path_text_control = build_pdf_path_text()
 
@@ -5922,30 +6635,50 @@ def main(page: ft.Page):
         )
     
     def create_crystal_report_tab():
-        # Initialize crystal report renderer
-        crystal_renderer = CrystalReportStyleRenderer()
+        print("🚀 create_crystal_report_tab() called - initializing Crystal Report tab")
+        try:
+            # Initialize crystal report renderer
+            crystal_renderer = CrystalReportStyleRenderer()
+            print("✅ CrystalReportStyleRenderer initialized successfully")
+        except Exception as ex:
+            print(f"❌ Error initializing CrystalReportStyleRenderer: {ex}")
+            import traceback
+            traceback.print_exc()
         
         # Status messages
-        status_text = ft.Text("พร้อมใช้งาน", size=14, color=ft.colors.GREEN_700)
+        status_text = ft.Text("พร้อมใช้งาน", size=14, color=ft.Colors.GREEN_700)
         
         # Template status
         template_status = ft.Text("กำลังตรวจสอบเทมเพลต...", size=12)
         
-                # PDF preview variables
+        # Form fields for withholder data
+        withholder_name = ft.TextField(label="ชื่อผู้มีหน้าที่หักภาษี", width=400)
+        withholder_address = ft.TextField(label="ที่อยู่ผู้มีหน้าที่หักภาษี", width=600, multiline=True, max_lines=3)
+        withholder_tax_id = ft.TextField(label="เลขประจำตัวผู้เสียภาษี", width=200, max_length=13)
+        
+        # Initialize pending_withholder_import_data for this tab
+        pending_withholder_import_data = None
+        
+        # Import required modules at the top of the function
+        import os
+        import json
+        import sys
+        
+        # PDF preview variables
         selected_pdf_path = os.path.join(os.getcwd(), "form.pdf")
         pdf_preview_img = None
 
         # UI controls for PDF preview
-        pdf_path_text_control = ft.Text(value=f"ตำแหน่งไฟล์: {selected_pdf_path}", size=11, color=ft.colors.GREY_600)
-        pdf_image_control = ft.Text("ไม่พบ form.pdf หรือไม่สามารถแสดงตัวอย่างได้", color=ft.colors.ORANGE_700)
+        pdf_path_text_control = ft.Text(value=f"ตำแหน่งไฟล์: {selected_pdf_path}", size=11, color=ft.Colors.GREY_600)
+        pdf_image_control = ft.Text("ไม่พบ form.pdf หรือไม่สามารถแสดงตัวอย่างได้", color=ft.Colors.ORANGE_700)
         
         # Container references for real-time updates
         main_pdf_container = ft.Container(
             content=pdf_image_control,
             width=595,
             height=842,
-            bgcolor=ft.colors.WHITE,
-            border=ft.border.all(1, ft.colors.GREY_300),
+            bgcolor=ft.Colors.WHITE,
+            border=ft.border.all(1, ft.Colors.GREY_300),
             border_radius=5,
             padding=10,
             alignment=ft.alignment.center
@@ -5955,16 +6688,173 @@ def main(page: ft.Page):
         def check_template():
             if os.path.exists(crystal_renderer.template_image_path):
                 template_status.value = f"✅ พบภาพพื้นหลัง: {crystal_renderer.template_image_path}"
-                template_status.color = ft.colors.GREEN_700
+                template_status.color = ft.Colors.GREEN_700
             elif os.path.exists(crystal_renderer.template_pdf_path):
                 template_status.value = f"🔄 พบ PDF เทมเพลต: {crystal_renderer.template_pdf_path}"
-                template_status.color = ft.colors.BLUE_700
+                template_status.color = ft.Colors.BLUE_700
             else:
                 template_status.value = f"⚠️ ไม่พบเทมเพลต (จะใช้โหมดโปร่งใส)"
-                template_status.color = ft.colors.ORANGE_700
+                template_status.color = ft.Colors.ORANGE_700
             page.update()
         
         check_template()
+        
+        # Auto-fill withholder data from saved settings
+        def auto_fill_withholder_data():
+            """โหลดข้อมูลผู้หักภาษีที่บันทึกไว้มาเติมในฟอร์ม"""
+            nonlocal pending_withholder_import_data
+            try:
+                conn = psycopg2.connect("postgresql://neondb_owner:npg_BidDY7RA4zWX@ep-long-haze-a17mcg70-pooler.ap-southeast-1.aws.neon.tech/program_tax?sslmode=require&channel_binding=require")
+                cur = conn.cursor()
+                
+                # Get saved withholder data
+                cur.execute("SELECT setting_value FROM withholder_settings WHERE setting_key = 'checkbox_states'")
+                result = cur.fetchone()
+                
+                if result:
+                    settings = result[0]
+                    withholder_data = settings.get("selected_withholder", {})
+                    
+                    if withholder_data:
+                        # Update status to show autofill success
+                        status_text.value = f"✅ โหลดข้อมูลผู้หักภาษี: {withholder_data.get('withholder_name', 'N/A')}"
+                        status_text.color = ft.Colors.GREEN_700
+                        page.update()
+                        
+                        # Store data for use in form filling
+                        pending_withholder_import_data = withholder_data
+                        
+                        # Update the page to reflect the loaded data
+                        page.update()
+                        
+                        return True
+                        
+            except Exception as ex:
+                print(f"Auto-fill withholder data error: {ex}")
+            finally:
+                try:
+                    if 'cur' in locals():
+                        cur.close()
+                    if 'conn' in locals():
+                        conn.close()
+                except Exception:
+                    pass
+            return False
+        
+        # Run auto-fill after a short delay
+        import threading
+        def delayed_auto_fill():
+            import time
+            time.sleep(1.0)  # Wait for UI to be ready
+            auto_fill_withholder_data()
+        
+        threading.Thread(target=delayed_auto_fill, daemon=True).start()
+        
+        # Auto-fill from pending data if available
+        def auto_fill_from_pending_data():
+            """โหลดข้อมูลจาก dashboard_to_crystal_data หรือ temp file มาเติมในฟอร์มทันที"""
+            try:
+                # วิธีใหม่: อ่านข้อมูลจาก dashboard_to_crystal_data
+                dashboard_data = None
+                
+                print(f"🔍 Checking dashboard_to_crystal_data: {dashboard_data}")
+                
+                # ตรวจสอบข้อมูลจากหลายแหล่ง
+                if not dashboard_data:
+                    # ลองตรวจสอบจาก global variable อีกครั้ง
+                    dashboard_data = globals().get('dashboard_to_crystal_data', None)
+                    print(f"🔍 Checking global dashboard_to_crystal_data: {dashboard_data}")
+                
+
+                
+                # วิธีใหม่: ลองอ่านข้อมูลจาก temp file
+                if not dashboard_data:
+                    temp_file_path = os.path.join(os.getcwd(), "temp_dashboard_data.json")
+                    print(f"🔍 Checking temp file: {temp_file_path}")
+                    
+                    if os.path.exists(temp_file_path):
+                        try:
+                            with open(temp_file_path, 'r', encoding='utf-8') as f:
+                                try:
+                                    dashboard_data = json.load(f)
+                                except json.JSONDecodeError as json_err:
+                                    print(f"❌ JSON decode error: {json_err}")
+                                    print("🔧 Recreating temp file...")
+                                    # ลบไฟล์เสียและข้าม
+                                    import os
+                                    os.remove(temp_file_path)
+                                    dashboard_data = None
+                            print(f"💾 Successfully loaded data from temp file: {dashboard_data}")
+                        except Exception as file_ex:
+                            print(f"❌ Failed to load from temp file: {file_ex}")
+                            dashboard_data = None
+                    else:
+                        print("⚠️ Temp file does not exist")
+                
+                if dashboard_data:
+                    payload = dashboard_data
+                    print(f"📦 Payload received from dashboard: {payload}")
+                    
+                    # ตรวจสอบว่าข้อมูลมีค่าที่ถูกต้องหรือไม่
+                    if not payload.get('withholder_name') and not payload.get('withholder_address') and not payload.get('withholder_tax_id'):
+                        print("⚠️ Dashboard data exists but has no valid content")
+                        return False
+                    
+                    # เติมข้อมูลในฟอร์ม
+                    if payload.get('withholder_name'):
+                        withholder_name.value = payload['withholder_name']
+                        print(f"✅ Set withholder_name: {payload['withholder_name']}")
+                    if payload.get('withholder_address'):
+                        withholder_address.value = payload['withholder_address']
+                        print(f"✅ Set withholder_address: {payload['withholder_address']}")
+                    if payload.get('withholder_tax_id'):
+                        withholder_tax_id.value = payload['withholder_tax_id']
+                        print(f"✅ Set withholder_tax_id: {payload['withholder_tax_id']}")
+                    
+                    # Update status
+                    status_text.value = f"✅ โหลดข้อมูลผู้หักภาษีจาก Dashboard: {payload.get('withholder_name', 'N/A')}"
+                    status_text.color = ft.Colors.GREEN_700
+                    page.update()
+                    
+                    print("✅ Auto-filled withholder data from dashboard successfully")
+                    return True
+                else:
+                    print("⚠️ No dashboard_to_crystal_data available from any source")
+                    
+            except Exception as ex:
+                print(f"❌ Auto-fill from dashboard data error: {ex}")
+                import traceback
+                traceback.print_exc()
+            return False
+        
+        # Run auto-fill from pending data after a short delay
+        def delayed_pending_auto_fill():
+            import time
+            print("⏰ delayed_pending_auto_fill started - waiting 1.0 seconds...")
+            time.sleep(1.0)  # Wait for UI to be ready
+            
+            # Try multiple times to get the data
+            max_retries = 3
+            for attempt in range(max_retries):
+                print(f"⏰ Attempt {attempt + 1}/{max_retries} - calling auto_fill_from_pending_data...")
+                result = auto_fill_from_pending_data()
+                print(f"⏰ auto_fill_from_pending_data result: {result}")
+                
+                if result:
+                    print("✅ Auto-fill successful, no need for more attempts")
+                    break
+                else:
+                    if attempt < max_retries - 1:
+                        print(f"⏰ Auto-fill failed, waiting 0.5 seconds before retry...")
+                        time.sleep(0.5)
+                    else:
+                        print("❌ Auto-fill failed after all attempts")
+        
+        print("🧵 Starting delayed_pending_auto_fill thread...")
+        threading.Thread(target=delayed_pending_auto_fill, daemon=True).start()
+        print("✅ delayed_pending_auto_fill thread started")
+        
+
         
         def rasterize_pdf_to_png(pdf_path):
             """Convert PDF first page to PNG for preview"""
@@ -5990,9 +6880,9 @@ def main(page: ft.Page):
                 if pdf_preview_img:
                     pdf_image_control = ft.Image(src=pdf_preview_img, fit=ft.ImageFit.CONTAIN, width=595, height=842)
                 else:
-                    pdf_image_control = ft.Text("ไม่สามารถแสดงตัวอย่าง PDF ได้ (ติดตั้ง PyMuPDF เพื่อดูตัวอย่าง)", color=ft.colors.ORANGE_700)
+                    pdf_image_control = ft.Text("ไม่สามารถแสดงตัวอย่าง PDF ได้ (ติดตั้ง PyMuPDF เพื่อดูตัวอย่าง)", color=ft.Colors.ORANGE_700)
             else:
-                pdf_image_control = ft.Text("ไม่พบ form.pdf หรือไม่สามารถแสดงตัวอย่างได้", color=ft.colors.ORANGE_700)
+                pdf_image_control = ft.Text("ไม่พบ form.pdf หรือไม่สามารถแสดงตัวอย่างได้", color=ft.Colors.ORANGE_700)
             
             # Update the main container with new content (only if it has been added to page)
             main_pdf_container.content = pdf_image_control
@@ -6019,7 +6909,7 @@ def main(page: ft.Page):
             
             # Reset coordinate test viewer
             coordinate_test_viewer.content = ft.Text("คลิก 'ทดสอบ' เพื่อดูตำแหน่งพิกัด", 
-                                                   size=12, color=ft.colors.GREY_500, 
+                                                   size=12, color=ft.Colors.GREY_500, 
                                                    text_align=ft.TextAlign.CENTER)
             try:
                 coordinate_test_viewer.update()
@@ -6027,7 +6917,7 @@ def main(page: ft.Page):
                 pass  # Container might not be added to page yet
             
             status_text.value = "✅ รีเซ็ตแสดงแบบฟอร์ม PDF ต้นฉบับแล้ว"
-            status_text.color = ft.colors.GREEN_700
+            status_text.color = ft.Colors.GREEN_700
             page.update()
         
         # Coordinate adjustment controls
@@ -6176,6 +7066,34 @@ def main(page: ft.Page):
                 ("card_number_8", "เลขที่บัตร 8", 540, 530, 10),
                 ("card_number_9", "เลขที่บัตร 9", 600, 530, 10),
                 ("card_number_10", "เลขที่บัตร 10", 660, 530, 10),
+                # 13-digit ID positions for withholdee (ผู้ถูกหัก) - default row just below
+                ("withholdee_id_1", "ผู้ถูกหัก 1", 120, 540, 10),
+                ("withholdee_id_2", "ผู้ถูกหัก 2", 156, 540, 10),
+                ("withholdee_id_3", "ผู้ถูกหัก 3", 192, 540, 10),
+                ("withholdee_id_4", "ผู้ถูกหัก 4", 228, 540, 10),
+                ("withholdee_id_5", "ผู้ถูกหัก 5", 264, 540, 10),
+                ("withholdee_id_6", "ผู้ถูกหัก 6", 300, 540, 10),
+                ("withholdee_id_7", "ผู้ถูกหัก 7", 336, 540, 10),
+                ("withholdee_id_8", "ผู้ถูกหัก 8", 372, 540, 10),
+                ("withholdee_id_9", "ผู้ถูกหัก 9", 408, 540, 10),
+                ("withholdee_id_10", "ผู้ถูกหัก 10", 444, 540, 10),
+                ("withholdee_id_11", "ผู้ถูกหัก 11", 480, 540, 10),
+                ("withholdee_id_12", "ผู้ถูกหัก 12", 516, 540, 10),
+                ("withholdee_id_13", "ผู้ถูกหัก 13", 552, 540, 10),
+                # 13-digit ID positions for withholder (ผู้หัก) - default row below
+                ("withholder_id_1", "ผู้หัก 1", 120, 560, 10),
+                ("withholder_id_2", "ผู้หัก 2", 156, 560, 10),
+                ("withholder_id_3", "ผู้หัก 3", 192, 560, 10),
+                ("withholder_id_4", "ผู้หัก 4", 228, 560, 10),
+                ("withholder_id_5", "ผู้หัก 5", 264, 560, 10),
+                ("withholder_id_6", "ผู้หัก 6", 300, 560, 10),
+                ("withholder_id_7", "ผู้หัก 7", 336, 560, 10),
+                ("withholder_id_8", "ผู้หัก 8", 372, 560, 10),
+                ("withholder_id_9", "ผู้หัก 9", 408, 560, 10),
+                ("withholder_id_10", "ผู้หัก 10", 444, 560, 10),
+                ("withholder_id_11", "ผู้หัก 11", 480, 560, 10),
+                ("withholder_id_12", "ผู้หัก 12", 516, 560, 10),
+                ("withholder_id_13", "ผู้หัก 13", 552, 560, 10),
                 # Salary digit positions 1-10
                 ("salary_pos_1", "เงินเดือน-ตำแหน่ง 1", 120, 395, 10),
                 ("salary_pos_2", "เงินเดือน-ตำแหน่ง 2", 170, 395, 10),
@@ -6287,7 +7205,7 @@ def main(page: ft.Page):
                                     ft.ElevatedButton(
                                         "ทดสอบ",
                                         on_click=lambda e, fid=field_id: test_single_field(fid),
-                                        style=ft.ButtonStyle(bgcolor=ft.colors.BLUE_500, color=ft.colors.WHITE)
+                                        style=ft.ButtonStyle(bgcolor=ft.Colors.BLUE_500, color=ft.Colors.WHITE)
                                     )
                                 ], spacing=5),
                                 padding=10
@@ -6303,10 +7221,10 @@ def main(page: ft.Page):
                 loaded = load_coordinates_from_db_initial()
                 if loaded:
                     status_text.value = "✅ โหลดพิกัดจากฐานข้อมูลแล้ว"
-                    status_text.color = ft.colors.GREEN_700
+                    status_text.color = ft.Colors.GREEN_700
                 else:
                     status_text.value = "ℹ️ ใช้ค่าพิกัดเริ่มต้น"
-                    status_text.color = ft.colors.ORANGE_700
+                    status_text.color = ft.Colors.ORANGE_700
                 try:
                     page.update()
                 except:
@@ -6329,7 +7247,7 @@ def main(page: ft.Page):
 
                 if loaded_db:
                     status_text.value = (status_text.value + " | 📍 โหลดพิกัดจาก DB แล้ว") if status_text.value else "📍 โหลดพิกัดจาก DB แล้ว"
-                    status_text.color = ft.colors.GREEN_700
+                    status_text.color = ft.Colors.GREEN_700
                     try:
                         page.update()
                     except:
@@ -6349,7 +7267,7 @@ def main(page: ft.Page):
                                 coordinate_fields[field_id]['y'].value = str(coords.get('y', coordinate_fields[field_id]['y'].value))
                                 coordinate_fields[field_id]['size'].value = str(coords.get('size', coordinate_fields[field_id]['size'].value))
                         status_text.value = (status_text.value + " | 📄 โหลดพิกัดจากไฟล์แล้ว") if status_text.value else "📄 โหลดพิกัดจากไฟล์แล้ว"
-                        status_text.color = ft.colors.GREEN_700
+                        status_text.color = ft.Colors.GREEN_700
                         try:
                             page.update()
                         except:
@@ -6360,7 +7278,7 @@ def main(page: ft.Page):
 
                 # 3) Otherwise keep defaults already set in controls
                 status_text.value = (status_text.value + " | ℹ️ ใช้พิกัดเริ่มต้น") if status_text.value else "ℹ️ ใช้พิกัดเริ่มต้น"
-                status_text.color = ft.colors.ORANGE_700
+                status_text.color = ft.Colors.ORANGE_700
                 try:
                     page.update()
                 except:
@@ -6371,11 +7289,11 @@ def main(page: ft.Page):
         # Add small PDF viewer for coordinate testing
         coordinate_test_viewer = ft.Container(
             content=ft.Text("คลิก 'ทดสอบ' เพื่อดูตำแหน่งพิกัด", 
-                           size=12, color=ft.colors.GREY_500, text_align=ft.TextAlign.CENTER),
+                           size=12, color=ft.Colors.GREY_500, text_align=ft.TextAlign.CENTER),
             width=300,
             height=400,
-            bgcolor=ft.colors.WHITE,
-            border=ft.border.all(1, ft.colors.GREY_300),
+            bgcolor=ft.Colors.WHITE,
+            border=ft.border.all(1, ft.Colors.GREY_300),
             border_radius=5,
             padding=10,
             alignment=ft.alignment.center
@@ -6386,7 +7304,7 @@ def main(page: ft.Page):
             try:
                 if not os.path.exists(selected_pdf_path):
                     status_text.value = "❌ ไม่พบไฟล์ PDF ต้นฉบับ"
-                    status_text.color = ft.colors.RED_700
+                    status_text.color = ft.Colors.RED_700
                     page.update()
                     return
                 
@@ -6498,7 +7416,7 @@ def main(page: ft.Page):
                     coordinate_test_viewer.content = ft.Text(
                         "ไม่สามารถแสดงตัวอย่างได้", 
                         size=10, 
-                        color=ft.colors.ORANGE_700,
+                        color=ft.Colors.ORANGE_700,
                         text_align=ft.TextAlign.CENTER
                     )
                     try:
@@ -6510,14 +7428,14 @@ def main(page: ft.Page):
                 # The PNG files serve as coordinate setting logs
                 
                 status_text.value = f"✅ ทดสอบ {coordinate_fields[field_id]['label']} - บันทึก PNG: {png_filename}"
-                status_text.color = ft.colors.GREEN_700
+                status_text.color = ft.Colors.GREEN_700
                 
                 # Force UI refresh
                 page.update()
                 
             except Exception as e:
                 status_text.value = f"❌ ข้อผิดพลาดในการทดสอบ: {str(e)}"
-                status_text.color = ft.colors.RED_700
+                status_text.color = ft.Colors.RED_700
                 page.update()
         
         def preview_all_coordinates(e):
@@ -6525,7 +7443,7 @@ def main(page: ft.Page):
             try:
                 if not os.path.exists(selected_pdf_path):
                     status_text.value = "❌ ไม่พบไฟล์ PDF ต้นฉบับ"
-                    status_text.color = ft.colors.RED_700
+                    status_text.color = ft.Colors.RED_700
                     page.update()
                     return
                 
@@ -6610,14 +7528,14 @@ def main(page: ft.Page):
                     pass
                 
                 status_text.value = "✅ แสดงตำแหน่งพิกัดทุกฟิลด์ด้วยวงกลมแดงขนาดใหญ่"
-                status_text.color = ft.colors.GREEN_700
+                status_text.color = ft.Colors.GREEN_700
                 
                 # Force UI refresh
                 page.update()
                 
             except Exception as e:
                 status_text.value = f"❌ ข้อผิดพลาด: {str(e)}"
-                status_text.color = ft.colors.RED_700
+                status_text.color = ft.Colors.RED_700
                 page.update()
         
         def save_coordinate_test_png(e):
@@ -6625,7 +7543,7 @@ def main(page: ft.Page):
             try:
                 if not os.path.exists(selected_pdf_path):
                     status_text.value = "❌ ไม่พบไฟล์ PDF ต้นฉบับ"
-                    status_text.color = ft.colors.RED_700
+                    status_text.color = ft.Colors.RED_700
                     page.update()
                     return
                 
@@ -6676,7 +7594,35 @@ def main(page: ft.Page):
                     "card_number_7": (480, 530),
                     "card_number_8": (540, 530),
                     "card_number_9": (600, 530),
-                    "card_number_10": (660, 530)
+                    "card_number_10": (660, 530),
+                    # withholdee id 13 digits
+                    "withholdee_id_1": (120, 540),
+                    "withholdee_id_2": (156, 540),
+                    "withholdee_id_3": (192, 540),
+                    "withholdee_id_4": (228, 540),
+                    "withholdee_id_5": (264, 540),
+                    "withholdee_id_6": (300, 540),
+                    "withholdee_id_7": (336, 540),
+                    "withholdee_id_8": (372, 540),
+                    "withholdee_id_9": (408, 540),
+                    "withholdee_id_10": (444, 540),
+                    "withholdee_id_11": (480, 540),
+                    "withholdee_id_12": (516, 540),
+                    "withholdee_id_13": (552, 540),
+                    # withholder id 13 digits
+                    "withholder_id_1": (120, 560),
+                    "withholder_id_2": (156, 560),
+                    "withholder_id_3": (192, 560),
+                    "withholder_id_4": (228, 560),
+                    "withholder_id_5": (264, 560),
+                    "withholder_id_6": (300, 560),
+                    "withholder_id_7": (336, 560),
+                    "withholder_id_8": (372, 560),
+                    "withholder_id_9": (408, 560),
+                    "withholder_id_10": (444, 560),
+                    "withholder_id_11": (480, 560),
+                    "withholder_id_12": (516, 560),
+                    "withholder_id_13": (552, 560)
                 }
                 
                 # Very small circles for precise positioning (16px diameter)
@@ -6811,7 +7757,7 @@ def main(page: ft.Page):
                     pass
                 
                 status_text.value = f"✅ บันทึก PNG ทดสอบพิกัดเรียบร้อย: {output_filename}"
-                status_text.color = ft.colors.GREEN_700
+                status_text.color = ft.Colors.GREEN_700
                 
                 # Force page update
                 try:
@@ -6821,7 +7767,7 @@ def main(page: ft.Page):
                     
             except Exception as ex:
                 status_text.value = f"❌ เกิดข้อผิดพลาดในการบันทึก PNG: {str(ex)}"
-                status_text.color = ft.colors.RED_700
+                status_text.color = ft.Colors.RED_700
                 try:
                     page.update()
                 except:
@@ -6848,15 +7794,15 @@ def main(page: ft.Page):
                     ensure_coordinate_table()
                     save_coordinates_to_db()
                     status_text.value = f"✅ บันทึกการตั้งค่าพิกัดแล้ว (ไฟล์ + DB): {config_path}"
-                    status_text.color = ft.colors.GREEN_700
+                    status_text.color = ft.Colors.GREEN_700
                 except Exception as ex:
                     status_text.value = f"⚠️ บันทึกไฟล์สำเร็จ แต่บันทึก DB ล้มเหลว: {str(ex)}"
-                    status_text.color = ft.colors.ORANGE_700
+                    status_text.color = ft.Colors.ORANGE_700
                 page.update()
                 
             except Exception as e:
                 status_text.value = f"❌ ไม่สามารถบันทึกการตั้งค่าได้: {str(e)}"
-                status_text.color = ft.colors.RED_700
+                status_text.color = ft.Colors.RED_700
                 page.update()
         
         def load_coordinates_config(e):
@@ -6872,17 +7818,17 @@ def main(page: ft.Page):
                         loaded = load_coordinates_from_db_initial()
                         if loaded:
                             status_text.value = "✅ โหลดการตั้งค่าพิกัดจากฐานข้อมูลแล้ว"
-                            status_text.color = ft.colors.GREEN_700
+                            status_text.color = ft.Colors.GREEN_700
                             page.update()
                             return
                         else:
                             status_text.value = "❌ ไม่พบไฟล์/ข้อมูลการตั้งค่า"
-                            status_text.color = ft.colors.ORANGE_700
+                            status_text.color = ft.Colors.ORANGE_700
                             page.update()
                             return
                     except Exception as ex:
                         status_text.value = f"❌ โหลดจาก DB ไม่สำเร็จ: {str(ex)}"
-                        status_text.color = ft.colors.RED_700
+                        status_text.color = ft.Colors.RED_700
                         page.update()
                         return
                 
@@ -6896,12 +7842,12 @@ def main(page: ft.Page):
                         coordinate_fields[field_id]['size'].value = str(coords['size'])
                 
                 status_text.value = f"✅ โหลดการตั้งค่าพิกัดแล้ว: {config_path}"
-                status_text.color = ft.colors.GREEN_700
+                status_text.color = ft.Colors.GREEN_700
                 page.update()
                 
             except Exception as e:
                 status_text.value = f"❌ ไม่สามารถโหลดการตั้งค่าได้: {str(e)}"
-                status_text.color = ft.colors.RED_700
+                status_text.color = ft.Colors.RED_700
                 page.update()
         
         def pick_pdf(e):
@@ -7140,7 +8086,7 @@ def main(page: ft.Page):
                 
                 if not os.path.exists(selected_pdf_path):
                     status_text.value = "❌ ไม่พบไฟล์ PDF ต้นฉบับ"
-                    status_text.color = ft.colors.RED_700
+                    status_text.color = ft.Colors.RED_700
                     page.update()
                     return
                 
@@ -7183,7 +8129,7 @@ def main(page: ft.Page):
                 doc.close()
                 
                 status_text.value = f"✅ ทดสอบภาษาไทยสำเร็จ: {test_filename}"
-                status_text.color = ft.colors.GREEN_700
+                status_text.color = ft.Colors.GREEN_700
                 if not thai_fontname:
                     status_text.value += " (ใช้ฟอนต์เริ่มต้น)"
                 if db_enc:
@@ -7192,7 +8138,7 @@ def main(page: ft.Page):
                 
             except Exception as ex:
                 status_text.value = f"❌ ข้อผิดพลาดในการทดสอบ: {str(ex)}"
-                status_text.color = ft.colors.RED_700
+                status_text.color = ft.Colors.RED_700
                 page.update()
                 print(f"🚫 Test error: {ex}")
         
@@ -7202,13 +8148,13 @@ def main(page: ft.Page):
                 if not all([withholder_name.value, withholder_tax_id.value, 
                            withholdee_name.value, withholdee_tax_id.value]):
                     status_text.value = "❌ กรุณากรอกข้อมูลที่จำเป็น"
-                    status_text.color = ft.colors.RED_700
+                    status_text.color = ft.Colors.RED_700
                     page.update()
                     return
                 
                 if not os.path.exists(selected_pdf_path):
                     status_text.value = "❌ ไม่พบไฟล์ PDF ต้นฉบับ"
-                    status_text.color = ft.colors.RED_700
+                    status_text.color = ft.Colors.RED_700
                     page.update()
                     return
                 
@@ -7217,7 +8163,7 @@ def main(page: ft.Page):
                     import fitz  # PyMuPDF
                 except ImportError:
                     status_text.value = "❌ ขาดไลบรารี PyMuPDF (ติดตั้งด้วย: pip install PyMuPDF)"
-                    status_text.color = ft.colors.RED_700
+                    status_text.color = ft.Colors.RED_700
                     page.update()
                     return
                 
@@ -7313,6 +8259,60 @@ def main(page: ft.Page):
                         field_value = card_number_9.value or ""
                     elif field_id == "card_number_10":
                         field_value = card_number_10.value or ""
+                    # withholdee 13 digits
+                    elif field_id == "withholdee_id_1":
+                        field_value = withholdee_id_1.value or ""
+                    elif field_id == "withholdee_id_2":
+                        field_value = withholdee_id_2.value or ""
+                    elif field_id == "withholdee_id_3":
+                        field_value = withholdee_id_3.value or ""
+                    elif field_id == "withholdee_id_4":
+                        field_value = withholdee_id_4.value or ""
+                    elif field_id == "withholdee_id_5":
+                        field_value = withholdee_id_5.value or ""
+                    elif field_id == "withholdee_id_6":
+                        field_value = withholdee_id_6.value or ""
+                    elif field_id == "withholdee_id_7":
+                        field_value = withholdee_id_7.value or ""
+                    elif field_id == "withholdee_id_8":
+                        field_value = withholdee_id_8.value or ""
+                    elif field_id == "withholdee_id_9":
+                        field_value = withholdee_id_9.value or ""
+                    elif field_id == "withholdee_id_10":
+                        field_value = withholdee_id_10.value or ""
+                    elif field_id == "withholdee_id_11":
+                        field_value = withholdee_id_11.value or ""
+                    elif field_id == "withholdee_id_12":
+                        field_value = withholdee_id_12.value or ""
+                    elif field_id == "withholdee_id_13":
+                        field_value = withholdee_id_13.value or ""
+                    # withholder 13 digits
+                    elif field_id == "withholder_id_1":
+                        field_value = withholder_id_1.value or ""
+                    elif field_id == "withholder_id_2":
+                        field_value = withholder_id_2.value or ""
+                    elif field_id == "withholder_id_3":
+                        field_value = withholder_id_3.value or ""
+                    elif field_id == "withholder_id_4":
+                        field_value = withholder_id_4.value or ""
+                    elif field_id == "withholder_id_5":
+                        field_value = withholder_id_5.value or ""
+                    elif field_id == "withholder_id_6":
+                        field_value = withholder_id_6.value or ""
+                    elif field_id == "withholder_id_7":
+                        field_value = withholder_id_7.value or ""
+                    elif field_id == "withholder_id_8":
+                        field_value = withholder_id_8.value or ""
+                    elif field_id == "withholder_id_9":
+                        field_value = withholder_id_9.value or ""
+                    elif field_id == "withholder_id_10":
+                        field_value = withholder_id_10.value or ""
+                    elif field_id == "withholder_id_11":
+                        field_value = withholder_id_11.value or ""
+                    elif field_id == "withholder_id_12":
+                        field_value = withholder_id_12.value or ""
+                    elif field_id == "withholder_id_13":
+                        field_value = withholder_id_13.value or ""
                     # salary positions 1..10
                     elif field_id == "salary_pos_1":
                         field_value = salary_pos_1.value or ""
@@ -7454,7 +8454,7 @@ def main(page: ft.Page):
                     # ReportLab succeeded, skip PyMuPDF
                     doc.close()
                     status_text.value = f"✅ บันทึกแบบฟอร์มด้วย ReportLab เรียบร้อย: {output_filename}"
-                    status_text.color = ft.colors.GREEN_700
+                    status_text.color = ft.Colors.GREEN_700
                     status_text.value += " (รองรับภาษาไทย 🇹🇭)"
                     page.update()
                     return
@@ -7472,14 +8472,14 @@ def main(page: ft.Page):
                 doc.close()
                 
                 status_text.value = f"✅ บันทึกแบบฟอร์มที่กรอกแล้วเรียบร้อย: {output_filename}"
-                status_text.color = ft.colors.GREEN_700
+                status_text.color = ft.Colors.GREEN_700
                 if not thai_fontname:
                     status_text.value += " (คำเตือน: ไม่พบฟอนต์ไทย ใช้ฟอนต์เริ่มต้นแทน)"
                 page.update()
                 
             except Exception as e:
                 status_text.value = f"❌ ข้อผิดพลาดในการกรอกแบบฟอร์ม: {str(e)}"
-                status_text.color = ft.colors.RED_700
+                status_text.color = ft.Colors.RED_700
                 page.update()
         
         def preview_pdf_with_data(e):
@@ -7549,7 +8549,7 @@ def main(page: ft.Page):
                 
                 if not table_to_use:
                     status_text.value = f"❌ ไม่พบตารางข้อมูล (มีตาราง: {', '.join(available_tables)})"
-                    status_text.color = ft.colors.RED_700
+                    status_text.color = ft.Colors.RED_700
                     page.update()
                     return
                 
@@ -7570,7 +8570,7 @@ def main(page: ft.Page):
                         
                         if not records:
                             status_text.value = f"⚠️ ไม่พบข้อมูลในตาราง {table_to_use}"
-                            status_text.color = ft.colors.ORANGE_700
+                            status_text.color = ft.Colors.ORANGE_700
                             page.update()
                             return
                         
@@ -7612,11 +8612,11 @@ def main(page: ft.Page):
                         data_grid = ft.DataTable(
                             columns=display_columns,
                             rows=data_rows,
-                            border=ft.border.all(2, ft.colors.GREY_400),
+                            border=ft.border.all(2, ft.Colors.GREY_400),
                             border_radius=8,
-                            vertical_lines=ft.BorderSide(1, ft.colors.GREY_300),
-                            horizontal_lines=ft.BorderSide(1, ft.colors.GREY_300),
-                            heading_row_color=ft.colors.BLUE_50,
+                            vertical_lines=ft.BorderSide(1, ft.Colors.GREY_300),
+                            horizontal_lines=ft.BorderSide(1, ft.Colors.GREY_300),
+                            heading_row_color=ft.Colors.BLUE_50,
                             heading_row_height=40,
                             data_row_min_height=35,
                             data_row_max_height=35,
@@ -7630,22 +8630,22 @@ def main(page: ft.Page):
                         
                         dialog_content = ft.Column([
                             ft.Text(f"🗂️ เลือกข้อมูลจากตาราง {table_to_use}", 
-                                   size=16, weight=ft.FontWeight.BOLD, color=ft.colors.BLUE_700),
+                                   size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.BLUE_700),
                             ft.Text(f"พบข้อมูล {len(records)} รายการ (แสดง 50 รายการล่าสุด)", 
-                                   size=12, color=ft.colors.GREY_600),
+                                   size=12, color=ft.Colors.GREY_600),
                             ft.Container(
                                 content=data_grid,
                                 height=400,
                                 width=800,
-                                border=ft.border.all(1, ft.colors.GREY_300),
+                                border=ft.border.all(1, ft.Colors.GREY_300),
                                 border_radius=8,
                                 padding=10,
-                                bgcolor=ft.colors.WHITE
+                                bgcolor=ft.Colors.WHITE
                             ),
                             ft.Row([
                                 ft.ElevatedButton("❌ ปิด", on_click=close_dialog,
-                                               style=ft.ButtonStyle(bgcolor=ft.colors.RED_700, color=ft.colors.WHITE)),
-                                ft.Text("👆 คลิกที่แถวเพื่อเลือกข้อมูล", size=12, color=ft.colors.GREEN_700, weight=ft.FontWeight.BOLD)
+                                               style=ft.ButtonStyle(bgcolor=ft.Colors.RED_700, color=ft.Colors.WHITE)),
+                                ft.Text("👆 คลิกที่แถวเพื่อเลือกข้อมูล", size=12, color=ft.Colors.GREEN_700, weight=ft.FontWeight.BOLD)
                             ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
                         ], tight=True)
                         
@@ -7662,7 +8662,7 @@ def main(page: ft.Page):
                         
             except Exception as ex:
                 status_text.value = f"❌ ข้อผิดพลาดในการโหลดข้อมูล: {str(ex)}"
-                status_text.color = ft.colors.RED_700
+                status_text.color = ft.Colors.RED_700
                 page.update()
                 print(f"🚫 Load records error: {ex}")
         
@@ -7759,14 +8759,14 @@ def main(page: ft.Page):
                 load_coordinates_from_database()
                 
                 status_text.value = f"✅ โหลดข้อมูล ID: {record[0]} เรียบร้อย"
-                status_text.color = ft.colors.GREEN_700
+                status_text.color = ft.Colors.GREEN_700
                 page.update()
                 
                 print(f"✅ Form filled with record ID: {record[0]}")
                 
             except Exception as ex:
                 status_text.value = f"❌ ข้อผิดพลาดในการเลือกข้อมูล: {str(ex)}"
-                status_text.color = ft.colors.RED_700
+                status_text.color = ft.Colors.RED_700
                 page.update()
                 print(f"🚫 Select record error: {ex}")
         
@@ -7818,16 +8818,16 @@ def main(page: ft.Page):
                     page.update()
                     
                     status_text.value = f"✅ โหลดข้อมูลแล้ว: {cert_data.get('withholdee_name', 'ไม่ระบุชื่อ')} (ID: {cert_id})"
-                    status_text.color = ft.colors.GREEN_700
+                    status_text.color = ft.Colors.GREEN_700
                     page.update()
                 else:
                     status_text.value = "❌ ไม่สามารถดึงข้อมูลได้"
-                    status_text.color = ft.colors.RED_700
+                    status_text.color = ft.Colors.RED_700
                     page.update()
                     
             except Exception as e:
                 status_text.value = f"❌ ข้อผิดพลาด: {str(e)}"
-                status_text.color = ft.colors.RED_700
+                status_text.color = ft.Colors.RED_700
                 page.update()
         
         def load_coordinates_from_database():
@@ -7848,15 +8848,46 @@ def main(page: ft.Page):
                             coordinate_fields[field_id]['x'].value = str(x)
                             coordinate_fields[field_id]['y'].value = str(y)
                             coordinate_fields[field_id]['size'].value = str(size)
+                
+                # Auto-fill withholder data from saved settings
+                try:
+                    cur.execute("SELECT setting_value FROM withholder_settings WHERE setting_key = 'checkbox_states'")
+                    result = cur.fetchone()
                     
-                    status_text.value += " | 📍 พิกัดถูกโหลดจากฐานข้อมูล"
-                    page.update()
+                    if result:
+                        settings = result[0]
+                        withholder_data = settings.get("selected_withholder", {})
+                        
+                        if withholder_data:
+                            # Fill withholder fields with saved data
+                            if withholder_data.get('withholder_name'):
+                                withholder_name.value = withholder_data['withholder_name']
+                            if withholder_data.get('withholder_address'):
+                                withholder_address.value = withholder_data['withholder_address']
+                            if withholder_data.get('withholder_tax_id'):
+                                withholder_tax_id.value = withholder_data['withholder_tax_id']
+                            
+                            # Update status
+                            status_text.value = f"✅ โหลดข้อมูลผู้หักภาษี: {withholder_data.get('withholder_name', 'N/A')}"
+                            status_text.color = ft.Colors.GREEN_700
+                            
+                            print("✅ Auto-filled withholder data from saved settings")
+                except Exception as ex:
+                    print(f"Auto-fill withholder data error: {ex}")
                 
-                conn.close()
+                # Update page after loading
+                page.update()
                 
-            except Exception as e:
-                print(f"Coordinate load error: {e}")
-                # Don't show error to user for this secondary feature
+            except Exception as ex:
+                print(f"Load coordinates error: {ex}")
+            finally:
+                try:
+                    if 'cur' in locals():
+                        cur.close()
+                    if 'conn' in locals():
+                        conn.close()
+                except Exception:
+                    pass
         
         def load_from_database(e):
             """Load data from database to fill the form - now shows selection dialog"""
@@ -7907,7 +8938,7 @@ def main(page: ft.Page):
                 
                 if not table_to_use:
                     status_text.value = f"❌ ไม่พบตารางข้อมูลที่เหมาะสม (มีตาราง: {', '.join(available_tables)})"
-                    status_text.color = ft.colors.RED_700
+                    status_text.color = ft.Colors.RED_700
                     page.update()
                     return
                 
@@ -7965,10 +8996,18 @@ def main(page: ft.Page):
                             withholder_name.value = str(get_value_from_mapping('withholder_name'))
                             withholder_address.value = str(get_value_from_mapping('withholder_address'))
                             withholder_tax_id.value = str(get_value_from_mapping('withholder_tax_id'))
+                            try:
+                                fill_card_numbers_from_withholder_tax_id(None)
+                            except Exception:
+                                pass
                             
                             withholdee_name.value = str(get_value_from_mapping('withholdee_name'))
                             withholdee_address.value = str(get_value_from_mapping('withholdee_address'))
                             withholdee_tax_id.value = str(get_value_from_mapping('withholdee_tax_id'))
+                            try:
+                                fill_card_numbers_from_tax_id(None)
+                            except Exception:
+                                pass
                             
                             certificate_book_no.value = str(get_value_from_mapping('certificate_book_no'))
                             certificate_no.value = str(get_value_from_mapping('certificate_no'))
@@ -7997,6 +9036,10 @@ def main(page: ft.Page):
                                         withholder_address.value = payload['withholder_address']
                                     if payload.get('withholder_tax_id'):
                                         withholder_tax_id.value = payload['withholder_tax_id']
+                                        try:
+                                            fill_card_numbers_from_withholder_tax_id(None)
+                                        except Exception:
+                                            pass
                                     pending_withholder_import_data = None
                             except Exception:
                                 pass
@@ -8026,105 +9069,169 @@ def main(page: ft.Page):
                                 pass
                             
                             status_text.value = f"✅ โหลดข้อมูลรายการแรกจาก {table_to_use} เรียบร้อย"
-                            status_text.color = ft.colors.GREEN_700
+                            status_text.color = ft.Colors.GREEN_700
                             
                             # Also load coordinate settings from database
                             load_coordinates_from_database()
+                            
+                            # Auto-fill withholder data from saved settings if available
+                            try:
+                                if pending_withholder_import_data:
+                                    payload = pending_withholder_import_data
+                                    if payload.get('withholder_name'):
+                                        withholder_name.value = payload['withholder_name']
+                                    if payload.get('withholder_address'):
+                                        withholder_address.value = payload['withholder_address']
+                                    if payload.get('withholder_tax_id'):
+                                        withholder_tax_id.value = payload['withholder_tax_id']
+                                    pending_withholder_import_data = None
+                                    print("✅ Auto-filled withholder data from saved settings")
+                            except Exception as ex:
+                                print(f"Auto-fill withholder data error: {ex}")
                             
                             print(f"✅ Auto-filled form with first record from {table_to_use}")
                             
                         else:
                             status_text.value = f"⚠️ ไม่พบข้อมูลในตาราง {table_to_use}"
-                            status_text.color = ft.colors.ORANGE_700
+                            status_text.color = ft.Colors.ORANGE_700
                         
                         page.update()
                         
             except Exception as ex:
                 status_text.value = f"❌ ข้อผิดพลาดในการโหลดข้อมูล: {str(ex)}"
-                status_text.color = ft.colors.RED_700
+                status_text.color = ft.Colors.RED_700
                 page.update()
                 print(f"🚫 Auto-fill error: {ex}")
 
         def auto_fill_from_selected_dashboard():
             """If a record was selected on the dashboard, load it into the form fields."""
             try:
-                nonlocal selected_transfer_id_for_pdf
-                if not selected_transfer_id_for_pdf:
+                global selected_transfer_id_for_pdf
+                
+                # First check if we have data from temp file (higher priority)
+                temp_file_path = os.path.join(os.getcwd(), "temp_dashboard_data.json")
+                temp_data_loaded = False
+                
+                if os.path.exists(temp_file_path):
+                    try:
+                        with open(temp_file_path, 'r', encoding='utf-8') as f:
+                            dashboard_data = json.load(f)
+                        print(f"🔄 Found temp file data in auto_fill_from_selected_dashboard: {dashboard_data}")
+                        
+                        if dashboard_data and dashboard_data.get('withholder_name'):
+                            # Use data from temp file (from dashboard button)
+                            withholder_name.value = dashboard_data.get('withholder_name', '')
+                            withholder_address.value = dashboard_data.get('withholder_address', '')
+                            withholder_tax_id.value = dashboard_data.get('withholder_tax_id', '')
+                            
+                            status_text.value = f"✅ โหลดข้อมูลผู้หักภาษีจาก Dashboard: {dashboard_data.get('withholder_name', '')}"
+                            status_text.color = ft.Colors.GREEN_700
+                            page.update()
+                            temp_data_loaded = True
+                            print(f"✅ Loaded withholder data from temp file")
+                    except Exception as file_ex:
+                        print(f"❌ Failed to load temp file in auto_fill_from_selected_dashboard: {file_ex}")
+                
+                # If no temp data or temp data doesn't have withholder info, try selected_transfer_id_for_pdf
+                if not temp_data_loaded and not selected_transfer_id_for_pdf:
+                    print("⚠️ No temp data and no selected_transfer_id_for_pdf")
                     return
+                    
+                if not temp_data_loaded:
+                    # Load from database using selected_transfer_id_for_pdf
+                    import psycopg2
+                    conn_str = "postgresql://neondb_owner:npg_BidDY7RA4zWX@ep-long-haze-a17mcg70-pooler.ap-southeast-1.aws.neon.tech/program_tax?sslmode=require&channel_binding=require"
 
-                import psycopg2
-                conn_str = "postgresql://neondb_owner:npg_BidDY7RA4zWX@ep-long-haze-a17mcg70-pooler.ap-southeast-1.aws.neon.tech/program_tax?sslmode=require&channel_binding=require"
-
-                with psycopg2.connect(conn_str) as conn:
-                    with conn.cursor() as cur:
-                        # Try to fetch optional remark column if exists
-                        try:
-                            cur.execute(
+                    with psycopg2.connect(conn_str) as conn:
+                        with conn.cursor() as cur:
+                            # Try to fetch optional remark column if exists
+                            try:
+                                cur.execute(
                                 """
                                 SELECT id, name, surname, transfer_amount, transfer_date, id_card, address, percent, total_amount, fee, net_amount, created_at, remark
                                 FROM transfer_records
                                 WHERE id = %s
                                 """,
-                                (selected_transfer_id_for_pdf,)
-                            )
-                        except Exception:
-                            # Reset aborted transaction before fallback
+                                    (selected_transfer_id_for_pdf,)
+                                )
+                            except Exception:
+                                # Reset aborted transaction before fallback
+                                try:
+                                    conn.rollback()
+                                except Exception:
+                                    pass
+                                cur.execute(
+                                    """
+                                    SELECT id, name, surname, transfer_amount, transfer_date, id_card, address, percent, total_amount, fee, net_amount, created_at
+                                    FROM transfer_records
+                                    WHERE id = %s
+                                    """,
+                                    (selected_transfer_id_for_pdf,)
+                                )
+                            rec = cur.fetchone()
+                            if not rec:
+                                return
+
+                            # Unpack
+                            # Unpack with optional remark at last position
+                            _id, _name, _surname, _amount, _date, _idcard, _address, _percent, _total, _fee, _net, _created, *_rest = rec
+                            _remark = _rest[0] if _rest else None
+
+                            # Map to crystal report fields (fill what we have)
+                            withholdee_name.value = f"{_name or ''} {_surname or ''}".strip()
+                            withholdee_address.value = _address or ""
+                            withholdee_tax_id.value = _idcard or ""
                             try:
-                                conn.rollback()
+                                fill_card_numbers_from_tax_id(None)
                             except Exception:
                                 pass
-                            cur.execute(
-                                """
-                                SELECT id, name, surname, transfer_amount, transfer_date, id_card, address, percent, total_amount, fee, net_amount, created_at
-                                FROM transfer_records
-                                WHERE id = %s
-                                """,
-                                (selected_transfer_id_for_pdf,)
-                            )
-                        rec = cur.fetchone()
-                        if not rec:
-                            return
+                            # Helper to format numbers as empty when zero
+                            def _fmt_amount(val):
+                                try:
+                                    v = float(val or 0)
+                                    return "" if v == 0 else f"{v:.2f}"
+                                except Exception:
+                                    return ""
+                            # Put transfer amount into income_1_amount for preview/fill convenience
+                            income_1_amount.value = _fmt_amount(_amount)
+                            # Map taxes: move fee tax into salary tax (income_1_tax), clear fee tax (income_2_tax)
+                            if (_remark or "").strip() == "ค่าธรรมเนียม":
+                                income_2_amount.value = ""
+                                income_1_tax.value = _fmt_amount(_total or _fee)
+                                income_2_tax.value = ""
+                            elif (_remark or "").strip() == "เงินเดือน":
+                                income_2_amount.value = _fmt_amount(_amount)
+                                income_1_tax.value = ""
+                                income_2_tax.value = ""
+                            else:
+                                # default behavior fallbacks
+                                income_2_amount.value = ""
+                                income_1_tax.value = _fmt_amount(_fee)
+                                income_2_tax.value = ""
+                            # Totals presentation (income total and tax total)
+                            total_income_display.value = f"{float(_total or _amount or 0):,.2f}"
+                            total_tax_display.value = f"{float(_fee or 0):,.2f}"
+                            total_tax_text.value = ""
+                            issue_date.value = str(_date) if _date else (issue_date.value or "")
+                            certificate_no.value = str(_id)
+                            # Always autofill dot markers
+                            try:
+                                dot_1.value = "."; dot_2.value = "."; dot_5.value = "."; dot_6.value = "."
+                            except Exception:
+                                pass
 
-                        # Unpack
-                        # Unpack with optional remark at last position
-                        _id, _name, _surname, _amount, _date, _idcard, _address, _percent, _total, _fee, _net, _created, *_rest = rec
-                        _remark = _rest[0] if _rest else None
-
-                        # Map to crystal report fields (fill what we have)
-                        withholdee_name.value = f"{_name or ''} {_surname or ''}".strip()
-                        withholdee_address.value = _address or ""
-                        withholdee_tax_id.value = _idcard or ""
-                        # Put transfer amount into income_1_amount for preview/fill convenience
-                        income_1_amount.value = f"{float(_amount or 0):.2f}"
-                        income_1_tax.value = "0.00"
-                        # Map fee/total based on remark
-                        if (_remark or "").strip() == "ค่าธรรมเนียม":
-                            income_2_amount.value = "0.00"
-                            income_2_tax.value = f"{float(_total or _fee or 0):.2f}"
-                        elif (_remark or "").strip() == "เงินเดือน":
-                            income_2_amount.value = f"{float(_amount or 0):.2f}"
-                            income_2_tax.value = "0.00"
-                        else:
-                            # default behavior fallbacks
-                            income_2_amount.value = "0.00"
-                            income_2_tax.value = f"{float(_fee or 0):.2f}"
-                        # Totals presentation (income total and tax total)
-                        total_income_display.value = f"{float(_total or _amount or 0):,.2f}"
-                        total_tax_display.value = f"{float(_fee or 0):,.2f}"
-                        total_tax_text.value = ""
-                        issue_date.value = str(_date) if _date else ""
-                        certificate_no.value = str(_id)
-
-                        status_text.value = f"✅ โหลดจากแดชบอร์ด: ID {_id}"
-                        status_text.color = ft.colors.GREEN_700
-                        page.update()
+                            status_text.value = f"✅ โหลดจากแดชบอร์ด: ID {_id}"
+                            status_text.color = ft.Colors.GREEN_700
+                            page.update()
             except Exception as ex:
                 print(f"Dashboard autofill error: {ex}")
         
         # Form fields
+        print("📝 Creating form fields...")
         withholder_name = ft.TextField(label="ชื่อผู้มีหน้าที่หักภาษี", width=400)
         withholder_address = ft.TextField(label="ที่อยู่ผู้มีหน้าที่หักภาษี", width=600, multiline=True, max_lines=3)
         withholder_tax_id = ft.TextField(label="เลขประจำตัวผู้เสียภาษี", width=200, max_length=13)
+        print("✅ Form fields created successfully")
         withholder_type = ft.Dropdown(
             label="ประเภท", width=200,
             options=[ft.dropdown.Option("บุคคล"), ft.dropdown.Option("นิติบุคคล"), 
@@ -8246,36 +9353,99 @@ def main(page: ft.Page):
         card_number_9 = ft.TextField(label="เลขที่บัตร 9", width=180)
         card_number_10 = ft.TextField(label="เลขที่บัตร 10", width=180)
 
+        # New: 13-digit ID inputs for both withholdee (ผู้ถูกหัก) and withholder (ผู้หัก)
+        withholdee_id_1 = ft.TextField(label="ผู้ถูกหัก 1", width=40, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        withholdee_id_2 = ft.TextField(label="ผู้ถูกหัก 2", width=40, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        withholdee_id_3 = ft.TextField(label="ผู้ถูกหัก 3", width=40, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        withholdee_id_4 = ft.TextField(label="ผู้ถูกหัก 4", width=40, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        withholdee_id_5 = ft.TextField(label="ผู้ถูกหัก 5", width=40, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        withholdee_id_6 = ft.TextField(label="ผู้ถูกหัก 6", width=40, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        withholdee_id_7 = ft.TextField(label="ผู้ถูกหัก 7", width=40, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        withholdee_id_8 = ft.TextField(label="ผู้ถูกหัก 8", width=40, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        withholdee_id_9 = ft.TextField(label="ผู้ถูกหัก 9", width=40, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        withholdee_id_10 = ft.TextField(label="ผู้ถูกหัก 10", width=46, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        withholdee_id_11 = ft.TextField(label="ผู้ถูกหัก 11", width=46, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        withholdee_id_12 = ft.TextField(label="ผู้ถูกหัก 12", width=46, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        withholdee_id_13 = ft.TextField(label="ผู้ถูกหัก 13", width=46, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+
+        withholder_id_1 = ft.TextField(label="ผู้หัก 1", width=40, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        withholder_id_2 = ft.TextField(label="ผู้หัก 2", width=40, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        withholder_id_3 = ft.TextField(label="ผู้หัก 3", width=40, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        withholder_id_4 = ft.TextField(label="ผู้หัก 4", width=40, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        withholder_id_5 = ft.TextField(label="ผู้หัก 5", width=40, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        withholder_id_6 = ft.TextField(label="ผู้หัก 6", width=40, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        withholder_id_7 = ft.TextField(label="ผู้หัก 7", width=40, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        withholder_id_8 = ft.TextField(label="ผู้หัก 8", width=40, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        withholder_id_9 = ft.TextField(label="ผู้หัก 9", width=40, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        withholder_id_10 = ft.TextField(label="ผู้หัก 10", width=46, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        withholder_id_11 = ft.TextField(label="ผู้หัก 11", width=46, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        withholder_id_12 = ft.TextField(label="ผู้หัก 12", width=46, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+        withholder_id_13 = ft.TextField(label="ผู้หัก 13", width=46, max_length=1, keyboard_type=ft.KeyboardType.NUMBER)
+
         def fill_card_numbers_from_tax_id(e=None):
             try:
                 taxid = ''.join([ch for ch in (withholdee_tax_id.value or '') if ch.isdigit()])
                 if len(taxid) == 13:
+                    # Fill grouped 10 boxes into positions 1–5 from withholdee tax id
                     card_number_1.value = taxid[0]
                     card_number_2.value = taxid[1:5]
                     card_number_3.value = taxid[5:10]
                     card_number_4.value = taxid[10:12]
                     card_number_5.value = taxid[12]
+                    # Cross-fill: put withholdee tax id into withholder 13 boxes
+                    withholder_id_1.value = taxid[0]
+                    withholder_id_2.value = taxid[1]
+                    withholder_id_3.value = taxid[2]
+                    withholder_id_4.value = taxid[3]
+                    withholder_id_5.value = taxid[4]
+                    withholder_id_6.value = taxid[5]
+                    withholder_id_7.value = taxid[6]
+                    withholder_id_8.value = taxid[7]
+                    withholder_id_9.value = taxid[8]
+                    withholder_id_10.value = taxid[9]
+                    withholder_id_11.value = taxid[10]
+                    withholder_id_12.value = taxid[11]
+                    withholder_id_13.value = taxid[12]
                 else:
                     card_number_1.value = card_number_2.value = card_number_3.value = card_number_4.value = card_number_5.value = ""
+                    withholder_id_1.value = withholder_id_2.value = withholder_id_3.value = withholder_id_4.value = withholder_id_5.value = ""
+                    withholder_id_6.value = withholder_id_7.value = withholder_id_8.value = withholder_id_9.value = withholder_id_10.value = ""
+                    withholder_id_11.value = withholder_id_12.value = withholder_id_13.value = ""
                 page.update()
             except Exception:
                 card_number_1.value = card_number_2.value = card_number_3.value = card_number_4.value = card_number_5.value = ""
+                withholder_id_1.value = withholder_id_2.value = withholder_id_3.value = withholder_id_4.value = withholder_id_5.value = ""
+                withholder_id_6.value = withholder_id_7.value = withholder_id_8.value = withholder_id_9.value = withholder_id_10.value = ""
+                withholder_id_11.value = withholder_id_12.value = withholder_id_13.value = ""
                 page.update()
 
         def fill_card_numbers_from_withholder_tax_id(e=None):
             try:
                 taxid = ''.join([ch for ch in (withholder_tax_id.value or '') if ch.isdigit()])
                 if len(taxid) == 13:
-                    card_number_6.value = taxid[0]
-                    card_number_7.value = taxid[1:5]
-                    card_number_8.value = taxid[5:10]
-                    card_number_9.value = taxid[10:12]
-                    card_number_10.value = taxid[12]
+                    # Cross-fill: put withholder tax id into withholdee 13 boxes
+                    withholdee_id_1.value = taxid[0]
+                    withholdee_id_2.value = taxid[1]
+                    withholdee_id_3.value = taxid[2]
+                    withholdee_id_4.value = taxid[3]
+                    withholdee_id_5.value = taxid[4]
+                    withholdee_id_6.value = taxid[5]
+                    withholdee_id_7.value = taxid[6]
+                    withholdee_id_8.value = taxid[7]
+                    withholdee_id_9.value = taxid[8]
+                    withholdee_id_10.value = taxid[9]
+                    withholdee_id_11.value = taxid[10]
+                    withholdee_id_12.value = taxid[11]
+                    withholdee_id_13.value = taxid[12]
                 else:
-                    card_number_6.value = card_number_7.value = card_number_8.value = card_number_9.value = card_number_10.value = ""
+                    withholdee_id_1.value = withholdee_id_2.value = withholdee_id_3.value = withholdee_id_4.value = withholdee_id_5.value = ""
+                    withholdee_id_6.value = withholdee_id_7.value = withholdee_id_8.value = withholdee_id_9.value = withholdee_id_10.value = ""
+                    withholdee_id_11.value = withholdee_id_12.value = withholdee_id_13.value = ""
                 page.update()
             except Exception:
-                card_number_6.value = card_number_7.value = card_number_8.value = card_number_9.value = card_number_10.value = ""
+                withholdee_id_1.value = withholdee_id_2.value = withholdee_id_3.value = withholdee_id_4.value = withholdee_id_5.value = ""
+                withholdee_id_6.value = withholdee_id_7.value = withholdee_id_8.value = withholdee_id_9.value = withholdee_id_10.value = ""
+                withholdee_id_11.value = withholdee_id_12.value = withholdee_id_13.value = ""
                 page.update()
         
         # Total fields
@@ -8285,6 +9455,64 @@ def main(page: ft.Page):
         
         last_certificate_id = None
         
+        # --- Helper: Convert number to Thai Baht text ---
+        def _thai_number_text(n: int) -> str:
+            digits = ["ศูนย์", "หนึ่ง", "สอง", "สาม", "สี่", "ห้า", "หก", "เจ็ด", "แปด", "เก้า"]
+            positions = ["", "สิบ", "ร้อย", "พัน", "หมื่น", "แสน", "ล้าน"]
+            if n == 0:
+                return "ศูนย์"
+            parts = []
+            million_unit = 0
+            while n > 0:
+                group = n % 1000000
+                n //= 1000000
+                txt = ""
+                num = group
+                pos = 0
+                while num > 0:
+                    d = num % 10
+                    if d != 0:
+                        word = digits[d]
+                        if pos == 1:
+                            if d == 2:
+                                word = "ยี่"
+                            elif d == 1:
+                                word = ""
+                            word += positions[pos]
+                        elif pos == 0 and d == 1 and group > 10:
+                            word = "เอ็ด"
+                        else:
+                            word += positions[pos]
+                        txt = word + txt
+                    pos += 1
+                    num //= 10
+                if million_unit > 0 and group == 0:
+                    parts.insert(0, "ศูนย์ล้าน")
+                elif million_unit > 0:
+                    parts.insert(0, txt + "ล้าน")
+                else:
+                    parts.insert(0, txt)
+                million_unit += 1
+            return "".join(parts).strip()
+
+        def _baht_text(amount: float) -> str:
+            try:
+                amt = float(amount or 0)
+            except Exception:
+                amt = 0.0
+            baht = int(amt)
+            satang = int(round((amt - baht) * 100))
+            result = ""
+            if baht > 0:
+                result += _thai_number_text(baht) + "บาท"
+            if satang > 0:
+                result += _thai_number_text(satang) + "สตางค์"
+            if result == "":
+                result = "ศูนย์บาทถ้วน"
+            if satang == 0 and baht > 0:
+                result += "ถ้วน"
+            return result
+
         def calculate_totals():
             try:
                 v1 = float(income_1_amount.value) if (income_1_amount.value or "").strip() else 0.0
@@ -8296,6 +9524,11 @@ def main(page: ft.Page):
                 
                 total_income_display.value = f"{total_income:,.2f}"
                 total_tax_display.value = f"{total_tax:,.2f}"
+                # Update Thai words for total income
+                try:
+                    total_tax_text.value = _baht_text(total_income)
+                except Exception:
+                    pass
                 # Auto-split income_1_amount digits into salary_pos_1..10 (right aligned by last digits)
                 try:
                     s = ''.join([ch for ch in (income_1_amount.value or '') if ch.isdigit()])
@@ -8360,6 +9593,12 @@ def main(page: ft.Page):
         # Event listeners
         for field in [income_1_amount, income_1_tax, income_2_amount, income_2_tax]:
             field.on_change = lambda e: calculate_totals()
+        # Auto-fill 13-digit boxes and grouped boxes when tax IDs change (no button needed)
+        try:
+            withholdee_tax_id.on_change = lambda e: fill_card_numbers_from_tax_id(e)
+            withholder_tax_id.on_change = lambda e: fill_card_numbers_from_withholder_tax_id(e)
+        except Exception:
+            pass
         
         # Helper: blank out zeros shown in numeric text fields
         def blank_out_zero_fields():
@@ -8393,7 +9632,7 @@ def main(page: ft.Page):
                 if not all([withholder_name.value, withholder_tax_id.value, 
                            withholdee_name.value, withholdee_tax_id.value]):
                     status_text.value = "❌ กรุณากรอกข้อมูลที่จำเป็น"
-                    status_text.color = ft.colors.RED_700
+                    status_text.color = ft.Colors.RED_700
                     page.update()
                     return
                 
@@ -8421,13 +9660,13 @@ def main(page: ft.Page):
                 if certificate_id:
                     last_certificate_id = certificate_id
                     status_text.value = f"✅ บันทึกเรียบร้อย (ID: {certificate_id})"
-                    status_text.color = ft.colors.GREEN_700
+                    status_text.color = ft.Colors.GREEN_700
                     generate_crystal_pdf_button.disabled = False
                     page.update()
                 
             except Exception as ex:
                 status_text.value = f"❌ เกิดข้อผิดพลาด: {str(ex)}"
-                status_text.color = ft.colors.RED_700
+                status_text.color = ft.Colors.RED_700
             
             page.update()
         
@@ -8436,7 +9675,7 @@ def main(page: ft.Page):
             
             if not last_certificate_id:
                 status_text.value = "❌ กรุณาบันทึกข้อมูลก่อน"
-                status_text.color = ft.colors.RED_700
+                status_text.color = ft.Colors.RED_700
                 page.update()
                 return
             
@@ -8449,7 +9688,7 @@ def main(page: ft.Page):
                     
                     if success:
                         status_text.value = f"✅ {message}"
-                        status_text.color = ft.colors.GREEN_700
+                        status_text.color = ft.Colors.GREEN_700
                         
                         # Show success dialog
                         def close_dialog(e):
@@ -8457,29 +9696,29 @@ def main(page: ft.Page):
                             page.update()
                         
                         dialog = ft.AlertDialog(
-                            title=ft.Text("Crystal Reports Style PDF สร้างสำเร็จ! 📊", color=ft.colors.GREEN_700, size=18),
+                            title=ft.Text("Crystal Reports Style PDF สร้างสำเร็จ! 📊", color=ft.Colors.GREEN_700, size=18),
                             content=ft.Container(
                                 content=ft.Column([
                                     ft.Row([
-                                        ft.Icon(ft.icons.ANALYTICS, size=40, color=ft.colors.BLUE_700),
+                                        ft.Icon(ft.icons.ANALYTICS, size=40, color=ft.Colors.BLUE_700),
                                         ft.Column([
                                             ft.Text("PDF ถูกสร้างด้วยเทคนิค Crystal Reports!", weight=ft.FontWeight.BOLD),
-                                            ft.Text("ใช้ภาพพื้นหลังต้นฉบับพร้อมระบบ Sections", color=ft.colors.BLUE_700)
+                                            ft.Text("ใช้ภาพพื้นหลังต้นฉบับพร้อมระบบ Sections", color=ft.Colors.BLUE_700)
                                         ], spacing=5)
                                     ], spacing=10),
                                     ft.Divider(),
                                     ft.Column([
-                                        ft.Row([ft.Icon(ft.icons.FOLDER, size=16, color=ft.colors.BLUE_700), 
+                                        ft.Row([ft.Icon(ft.icons.FOLDER, size=16, color=ft.Colors.BLUE_700), 
                                                ft.Text(f"ไฟล์: {pdf_filename}", size=12, weight=ft.FontWeight.BOLD)]),
-                                        ft.Row([ft.Icon(ft.icons.LOCATION_ON, size=16, color=ft.colors.BLUE_700), 
+                                        ft.Row([ft.Icon(ft.icons.LOCATION_ON, size=16, color=ft.Colors.BLUE_700), 
                                                ft.Text(f"ตำแหน่ง: {os.path.abspath(pdf_filename)}", size=12)]),
-                                        ft.Row([ft.Icon(ft.icons.FINGERPRINT, size=16, color=ft.colors.BLUE_700), 
+                                        ft.Row([ft.Icon(ft.icons.FINGERPRINT, size=16, color=ft.Colors.BLUE_700), 
                                                ft.Text(f"ID: {last_certificate_id}", size=12)]),
                                     ], spacing=8),
                                     ft.Divider(),
                                     ft.Container(
                                         content=ft.Column([
-                                            ft.Text("🏗️ เทคนิค Crystal Reports ที่ใช้:", weight=ft.FontWeight.BOLD, color=ft.colors.GREEN_700),
+                                            ft.Text("🏗️ เทคนิค Crystal Reports ที่ใช้:", weight=ft.FontWeight.BOLD, color=ft.Colors.GREEN_700),
                                             ft.Text("• Page Header / Report Header / Detail Section", size=12),
                                             ft.Text("• Report Footer / Page Footer Structure", size=12),
                                             ft.Text("• Field Objects with Precise Positioning", size=12),
@@ -8488,7 +9727,7 @@ def main(page: ft.Page):
                                             ft.Text("• Multi-line Text with Can Grow", size=12),
                                             ft.Text("• Professional Report Layout", size=12),
                                         ], spacing=5),
-                                        bgcolor=ft.colors.GREEN_50,
+                                        bgcolor=ft.Colors.GREEN_50,
                                         padding=15,
                                         border_radius=10
                                     )
@@ -8497,7 +9736,7 @@ def main(page: ft.Page):
                             ),
                             actions=[
                                 ft.TextButton("🎉 ยอดเยี่ยม!", on_click=close_dialog,
-                                            style=ft.ButtonStyle(bgcolor=ft.colors.GREEN_700, color=ft.colors.WHITE))
+                                            style=ft.ButtonStyle(bgcolor=ft.Colors.GREEN_700, color=ft.Colors.WHITE))
                             ]
                         )
                         page.dialog = dialog
@@ -8505,11 +9744,11 @@ def main(page: ft.Page):
                         
                     else:
                         status_text.value = f"❌ {message}"
-                        status_text.color = ft.colors.RED_700
+                        status_text.color = ft.Colors.RED_700
                 
             except Exception as ex:
                 status_text.value = f"❌ เกิดข้อผิดพลาด: {str(ex)}"
-                status_text.color = ft.colors.RED_700
+                status_text.color = ft.Colors.RED_700
             
             page.update()
         
@@ -8541,7 +9780,7 @@ def main(page: ft.Page):
             
             if not certificates:
                 status_text.value = "ไม่มีข้อมูลในฐานข้อมูล"
-                status_text.color = ft.colors.ORANGE_700
+                status_text.color = ft.Colors.ORANGE_700
                 page.update()
                 return
             
@@ -8563,14 +9802,14 @@ def main(page: ft.Page):
                         
                         if success:
                             status_text.value = f"✅ Crystal PDF: {pdf_filename}"
-                            status_text.color = ft.colors.GREEN_700
+                            status_text.color = ft.Colors.GREEN_700
                         else:
                             status_text.value = f"❌ {message}"
-                            status_text.color = ft.colors.RED_700
+                            status_text.color = ft.Colors.RED_700
                             
                 except Exception as ex:
                     status_text.value = f"❌ เกิดข้อผิดพลาด: {str(ex)}"
-                    status_text.color = ft.colors.RED_700
+                    status_text.color = ft.Colors.RED_700
                 
                 dialog.open = False
                 page.update()
@@ -8580,7 +9819,7 @@ def main(page: ft.Page):
                 crystal_button = ft.IconButton(
                     icon=ft.icons.ANALYTICS,
                     tooltip="สร้าง Crystal Reports PDF",
-                    icon_color=ft.colors.GREEN_700,
+                    icon_color=ft.Colors.GREEN_700,
                     on_click=lambda e, cert_id=cert[0]: generate_crystal_for_cert(cert_id)
                 )
                 
@@ -8602,7 +9841,7 @@ def main(page: ft.Page):
                 title=ft.Text(f"รายการใบรับรอง ({len(certificates)} รายการ)"),
                 content=ft.Container(
                     content=ft.Column([
-                        ft.Text("📊 คลิกปุ่มเขียวเพื่อสร้าง PDF แบบ Crystal Reports", size=12, color=ft.colors.GREEN_700),
+                        ft.Text("📊 คลิกปุ่มเขียวเพื่อสร้าง PDF แบบ Crystal Reports", size=12, color=ft.Colors.GREEN_700),
                         data_table
                     ], scroll=ft.ScrollMode.AUTO),
                     width=900,
@@ -8619,7 +9858,7 @@ def main(page: ft.Page):
         generate_crystal_pdf_button = ft.ElevatedButton(
             "📊 สร้าง Crystal Reports PDF", 
             on_click=generate_crystal_pdf,
-            style=ft.ButtonStyle(bgcolor=ft.colors.GREEN_700, color=ft.colors.WHITE),
+            style=ft.ButtonStyle(bgcolor=ft.Colors.GREEN_700, color=ft.Colors.WHITE),
             disabled=True,
             tooltip="บันทึกข้อมูลก่อนเพื่อสร้าง PDF แบบ Crystal Reports"
         )
@@ -8630,7 +9869,7 @@ def main(page: ft.Page):
             try:
                 if not pending_withholder_import_data:
                     status_text.value = "❌ ไม่มีข้อมูลผู้หักภาษีที่เลือกจากแท็บนำเข้า"
-                    status_text.color = ft.colors.RED_700
+                    status_text.color = ft.Colors.RED_700
                     page.update();
                     return
                 payload = pending_withholder_import_data or {}
@@ -8639,12 +9878,173 @@ def main(page: ft.Page):
                 withholder_tax_id.value = payload.get('withholder_tax_id', '') or ''
                 pending_withholder_import_data = None
                 status_text.value = "✅ เติมข้อมูลผู้มีหน้าที่หักภาษีจากแท็บนำเข้าแล้ว"
-                status_text.color = ft.colors.GREEN_700
+                status_text.color = ft.Colors.GREEN_700
                 page.update()
             except Exception as ex:
                 status_text.value = f"❌ เติมข้อมูลไม่สำเร็จ: {ex}"
-                status_text.color = ft.colors.RED_700
+                status_text.color = ft.Colors.RED_700
                 page.update()
+
+        # Auto-fill ONLY withholdee from Dashboard selection (button handler)
+        def auto_fill_from_selected_dashboard():
+            try:
+                # Preferred source: fetch by selected_transfer_id_for_pdf from Neon DB
+                record = {}
+                try:
+                    selected_id = globals().get('selected_transfer_id_for_pdf', None)
+                except Exception:
+                    selected_id = None
+
+                if selected_id:
+                    try:
+                        import psycopg2
+                        conn_str = "postgresql://neondb_owner:npg_BidDY7RA4zWX@ep-long-haze-a17mcg70-pooler.ap-southeast-1.aws.neon.tech/program_tax?sslmode=require&channel_binding=require"
+                        with psycopg2.connect(conn_str) as conn:
+                            with conn.cursor() as cur:
+                                try:
+                                    cur.execute(
+                                        """
+                                        SELECT id, name, surname, transfer_amount, transfer_date, id_card, address, percent, total_amount, fee, net_amount
+                                        FROM transfer_records
+                                        WHERE id = %s
+                                        """,
+                                        (selected_id,)
+                                    )
+                                except Exception:
+                                    conn.rollback()
+                                    raise
+                                row = cur.fetchone()
+                                if row:
+                                    record = {
+                                        'id': row[0],
+                                        'name': row[1],
+                                        'surname': row[2],
+                                        'transfer_amount': float(row[3] or 0),
+                                        'transfer_date': row[4],
+                                        'id_card': row[5],
+                                        'address': row[6],
+                                        'percent': float(row[7] or 0),
+                                        'total_amount': float(row[8] or 0),
+                                        'fee': float(row[9] or 0),
+                                        'net_amount': float(row[10] or 0),
+                                    }
+                    except Exception as db_ex:
+                        print(f"DB fetch error in auto_fill_from_selected_dashboard: {db_ex}")
+
+                # Fallback: temp file or global payload
+                if not record:
+                    temp_file_path = os.path.join(os.getcwd(), "temp_dashboard_data.json")
+                    dashboard_data = None
+                    if os.path.exists(temp_file_path):
+                        try:
+                            with open(temp_file_path, 'r', encoding='utf-8') as f:
+                                dashboard_data = json.load(f)
+                        except Exception as file_ex:
+                            print(f"❌ Failed to read temp_dashboard_data.json: {file_ex}")
+                            dashboard_data = None
+                    if dashboard_data is None:
+                        dashboard_data = globals().get('dashboard_to_crystal_data', None)
+                    if dashboard_data and dashboard_data.get('transfer_record'):
+                        record = dashboard_data.get('transfer_record') or {}
+
+                if not record:
+                    status_text.value = "❌ ไม่พบข้อมูลจาก Dashboard/ฐานข้อมูล"
+                    status_text.color = ft.Colors.RED_700
+                    page.update()
+                    return
+
+                # Fill withholdee fields unconditionally so panel reflects the selected record immediately
+                full_name = f"{record.get('name', '')} {record.get('surname', '')}".strip()
+                withholdee_name.value = full_name
+                withholdee_address.value = record.get('address', '') or ''
+                withholdee_tax_id.value = record.get('id_card', '') or ''
+                try:
+                    # Ensure both 13-digit sections are populated
+                    fill_card_numbers_from_tax_id(None)
+                    fill_card_numbers_from_withholder_tax_id(None)
+                except Exception:
+                    pass
+                # Also bring withholder data into the panel automatically (as if pressing the fill button)
+                try:
+                    apply_withholder_payload(None)
+                except Exception:
+                    pass
+                try:
+                    auto_fill_withholder_data()
+                except Exception:
+                    pass
+
+                transfer_amount = 0.0
+                fee = 0.0
+                try:
+                    transfer_amount = float(record.get('transfer_amount') or 0)
+                except Exception:
+                    pass
+                try:
+                    fee = float(record.get('fee') or 0)
+                except Exception:
+                    pass
+
+                def _fmt_amount2(val):
+                    try:
+                        v = float(val or 0)
+                        return "" if v == 0 else f"{v:.2f}"
+                    except Exception:
+                        return ""
+                income_1_amount.value = _fmt_amount2(transfer_amount)
+                # Move fee tax into salary tax field; clear fee tax
+                income_1_tax.value = _fmt_amount2(fee)
+                income_2_amount.value = ""
+                income_2_tax.value = ""
+
+                total_income_display.value = f"{transfer_amount:,.2f}"
+                total_tax_display.value = f"{fee:,.2f}"
+
+                # Fill date fields if missing (use transfer_date/date from selected record)
+                try:
+                    date_val = record.get('transfer_date') or record.get('date') or ""
+                    if not (issue_date.value or '').strip():
+                        issue_date.value = str(date_val) if date_val is not None else ''
+                    # Do not auto-fill fee payment date; leave it blank
+                    fee_payment_date.value = ''
+                except Exception:
+                    pass
+                # Always autofill dot markers
+                try:
+                    dot_1.value = "."; dot_2.value = "."; dot_5.value = "."; dot_6.value = "."
+                except Exception:
+                    pass
+
+                # Recompute digit slots
+                try:
+                    calculate_totals()
+                except Exception:
+                    pass
+
+                status_text.value = "✅ โหลดผู้ถูกหักภาษีจากข้อมูลที่เลือกสำเร็จ (ไม่แก้ผู้หักภาษี/ไม่ทับค่าที่มีอยู่)"
+                status_text.color = ft.Colors.GREEN_700
+                page.update()
+
+                # Auto-generate PDF immediately using current coordinates (no manual action required)
+                try:
+                    import threading, time
+                    def _auto_generate_pdf():
+                        try:
+                            time.sleep(0.3)  # ensure UI values are set
+                            fill_and_save_pdf(None)
+                            print("✅ Auto-generated PDF after dashboard selection")
+                        except Exception as gen_ex:
+                            print(f"❌ Auto-generate PDF error: {gen_ex}")
+                    threading.Thread(target=_auto_generate_pdf, daemon=True).start()
+                except Exception as _th_ex:
+                    print(f"❌ Could not start auto-generate thread: {_th_ex}")
+            except Exception as ex:
+                print(f"❌ Failed auto_fill_from_selected_dashboard: {ex}")
+        # Make this fill function accessible globally so other tabs/threads can invoke it reliably
+        try:
+            globals()['auto_fill_from_selected_dashboard'] = auto_fill_from_selected_dashboard
+        except Exception:
+            pass
         
         return ft.Container(
             content=ft.Column([
@@ -8652,49 +10052,49 @@ def main(page: ft.Page):
                 ft.Container(
                     content=ft.Column([
                         ft.Row([
-                            ft.Icon(ft.icons.ANALYTICS, size=40, color=ft.colors.GREEN_700),
+                            ft.Icon(ft.icons.ANALYTICS, size=40, color=ft.Colors.GREEN_700),
                             ft.Column([
                                 ft.Text("Crystal Reports Style PDF Generator", size=24, weight=ft.FontWeight.BOLD),
-                                ft.Text("Professional Report Engine with Background Image Support", size=14, color=ft.colors.GREY_700),
+                                ft.Text("Professional Report Engine with Background Image Support", size=14, color=ft.Colors.GREY_700),
                                 template_status
                             ], spacing=2)
                         ]),
-                        ft.Divider(height=1, color=ft.colors.GREY_300),
+                        ft.Divider(height=1, color=ft.Colors.GREY_300),
                         # PDF preview block (form.pdf -> image) + picker
                         ft.Container(
                             content=ft.Column([
-                                ft.Text("แสดงตัวอย่างไฟล์ PDF (form.pdf)", size=12, color=ft.colors.GREY_700),
+                                ft.Text("แสดงตัวอย่างไฟล์ PDF (form.pdf)", size=12, color=ft.Colors.GREY_700),
                                 ft.Row([
                                     pdf_path_text_control,
                                     ft.ElevatedButton("เลือกไฟล์ PDF", icon=ft.icons.UPLOAD_FILE, on_click=pick_pdf),
                                     ft.ElevatedButton("🔄 รีเซ็ต PDF", on_click=reset_pdf_preview,
-                                                    style=ft.ButtonStyle(bgcolor=ft.colors.GREY_700, color=ft.colors.WHITE)),
+                                                    style=ft.ButtonStyle(bgcolor=ft.Colors.GREY_700, color=ft.Colors.WHITE)),
                                 ], spacing=10),
                                 main_pdf_container
                             ], spacing=8),
-                            bgcolor=ft.colors.GREY_50,
+                            bgcolor=ft.Colors.GREY_50,
                             padding=10,
                             border_radius=8,
                         ),
                         ft.Container(
                             content=ft.Column([
                                 ft.Row([
-                                    ft.Icon(ft.icons.ARCHITECTURE, size=16, color=ft.colors.GREEN_700),
+                                    ft.Icon(ft.icons.ARCHITECTURE, size=16, color=ft.Colors.GREEN_700),
                                     ft.Text("เทคนิค Crystal Reports: Report Sections, Field Objects, Formula Fields, Background Integration", 
-                                           size=12, color=ft.colors.GREEN_700, weight=ft.FontWeight.BOLD)
+                                           size=12, color=ft.Colors.GREEN_700, weight=ft.FontWeight.BOLD)
                                 ], spacing=5),
                                 ft.Row([
-                                    ft.Icon(ft.icons.LAYERS, size=16, color=ft.colors.BLUE_700),
+                                    ft.Icon(ft.icons.LAYERS, size=16, color=ft.Colors.BLUE_700),
                                     ft.Text("• Page/Report Headers • Detail Section • Calculated Fields • Professional Layout • High DPI Output", 
-                                           size=11, color=ft.colors.BLUE_700)
+                                           size=11, color=ft.Colors.BLUE_700)
                                 ], spacing=5)
                             ], spacing=5),
-                            bgcolor=ft.colors.GREEN_50,
+                            bgcolor=ft.Colors.GREEN_50,
                             padding=15,
                             border_radius=10
                         )
                     ], spacing=10),
-                    bgcolor=ft.colors.GREY_50,
+                    bgcolor=ft.Colors.GREY_50,
                     border_radius=10,
                     padding=20,
                     margin=ft.margin.only(bottom=20)
@@ -8703,28 +10103,28 @@ def main(page: ft.Page):
                 # Action buttons
                 ft.Row([
                     ft.ElevatedButton("💾 บันทึกข้อมูล", on_click=save_form, 
-                                    style=ft.ButtonStyle(bgcolor=ft.colors.BLUE_700, color=ft.colors.WHITE)),
+                                    style=ft.ButtonStyle(bgcolor=ft.Colors.BLUE_700, color=ft.Colors.WHITE)),
                     generate_crystal_pdf_button,
                     ft.ElevatedButton("👁️ แสดง PDF", on_click=preview_pdf_with_data,
-                                    style=ft.ButtonStyle(bgcolor=ft.colors.CYAN_700, color=ft.colors.WHITE)),
+                                    style=ft.ButtonStyle(bgcolor=ft.Colors.CYAN_700, color=ft.Colors.WHITE)),
                     ft.ElevatedButton("📄 กรอกใน PDF", on_click=fill_and_save_pdf,
-                                    style=ft.ButtonStyle(bgcolor=ft.colors.GREEN_700, color=ft.colors.WHITE)),
+                                    style=ft.ButtonStyle(bgcolor=ft.Colors.GREEN_700, color=ft.Colors.WHITE)),
                     ft.ElevatedButton("🧪 ทดสอบภาษาไทย", on_click=test_thai_text_pdf,
-                                    style=ft.ButtonStyle(bgcolor=ft.colors.DEEP_ORANGE_700, color=ft.colors.WHITE)),
+                                    style=ft.ButtonStyle(bgcolor=ft.Colors.DEEP_ORANGE_700, color=ft.Colors.WHITE)),
                     ft.ElevatedButton("📋 เลือกจากฐานข้อมูล", on_click=load_from_database,
-                                    style=ft.ButtonStyle(bgcolor=ft.colors.INDIGO_700, color=ft.colors.WHITE)),
+                                    style=ft.ButtonStyle(bgcolor=ft.Colors.INDIGO_700, color=ft.Colors.WHITE)),
                     ft.ElevatedButton("⬇️ ดึงข้อมูลที่เลือก", on_click=lambda e: auto_fill_from_selected_dashboard(),
-                                    style=ft.ButtonStyle(bgcolor=ft.colors.BLUE_700, color=ft.colors.WHITE),
+                                    style=ft.ButtonStyle(bgcolor=ft.Colors.BLUE_700, color=ft.Colors.WHITE),
                                     tooltip="ดึงข้อมูลจากแถวที่เลือกในหน้าแรกมาใส่ผู้ถูกหักภาษี"),
                     ft.ElevatedButton("📥 ดึงข้อมูลผู้หักภาษี", on_click=apply_withholder_payload,
-                                    style=ft.ButtonStyle(bgcolor=ft.colors.TEAL_700, color=ft.colors.WHITE),
+                                    style=ft.ButtonStyle(bgcolor=ft.Colors.TEAL_700, color=ft.Colors.WHITE),
                                     tooltip="นำข้อมูลผู้หักภาษีจากแท็บ\n'นำเข้าผู้หักภาษีจาก excel' มาเติม"),
                     ft.ElevatedButton("🚀 โหลดรายการแรก", on_click=auto_fill_first_record,
-                                    style=ft.ButtonStyle(bgcolor=ft.colors.PINK_700, color=ft.colors.WHITE)),
+                                    style=ft.ButtonStyle(bgcolor=ft.Colors.PINK_700, color=ft.Colors.WHITE)),
                     ft.ElevatedButton("🗑️ เคลียร์ฟอร์ม", on_click=clear_form,
-                                    style=ft.ButtonStyle(bgcolor=ft.colors.ORANGE_700, color=ft.colors.WHITE)),
+                                    style=ft.ButtonStyle(bgcolor=ft.Colors.ORANGE_700, color=ft.Colors.WHITE)),
                     ft.ElevatedButton("📋 ดูรายการ", on_click=view_certificates,
-                                    style=ft.ButtonStyle(bgcolor=ft.colors.PURPLE_700, color=ft.colors.WHITE))
+                                    style=ft.ButtonStyle(bgcolor=ft.Colors.PURPLE_700, color=ft.Colors.WHITE))
                 ], alignment=ft.MainAxisAlignment.CENTER, spacing=10, wrap=True),
                 
                 status_text,
@@ -8790,7 +10190,7 @@ def main(page: ft.Page):
                                         fee_tax_pos_5, fee_tax_pos_6, fee_tax_pos_7, fee_tax_pos_8], spacing=6, wrap=True),
                                 ft.Row([dot_1, dot_2, dot_3, dot_4, dot_5, dot_6], spacing=6, wrap=True),
                                 ft.Row([income_2_amount, income_2_tax], spacing=10),
-                                ft.Divider(height=20, color=ft.colors.BLUE_700),
+                                ft.Divider(height=20, color=ft.Colors.BLUE_700),
                                 ft.Row([total_income_display, total_tax_display], spacing=10),
                                 ft.Row([
                                     total_income_pos_1, total_income_pos_2, total_income_pos_3, total_income_pos_4, total_income_pos_5,
@@ -8822,12 +10222,18 @@ def main(page: ft.Page):
                 ),
                 # New section: เลขบัตรสิบตำแหน่ง
                 ft.ExpansionTile(
-                    title=ft.Text("เลขบัตรสิบตำแหน่ง", weight=ft.FontWeight.BOLD),
+                    title=ft.Text("เลขบัตรสิบสามตำแหน่ง (ผู้หัก/ผู้ถูกหัก) + สิบตำแหน่ง (กลุ่ม)", weight=ft.FontWeight.BOLD),
                     initially_expanded=False,
                     controls=[
                         ft.Container(
                             content=ft.Column([
-                                ft.Text("กรอกข้อความเพื่อใส่ลง PDF (ไม่บันทึกฐานข้อมูล)", size=12, color=ft.colors.GREY_700),
+                                ft.Text("กรอกเลขประจำตัวผู้เสียภาษี 13 หลัก แยกช่อง และกล่องกลุ่ม 10 ช่อง (ใส่ลง PDF ไม่บันทึกฐานข้อมูล)", size=12, color=ft.Colors.GREY_700),
+                                ft.Text("ผู้หักภาษี (13 หลัก)", weight=ft.FontWeight.BOLD),
+                                ft.Row([withholdee_id_1, withholdee_id_2, withholdee_id_3, withholdee_id_4, withholdee_id_5, withholdee_id_6, withholdee_id_7, withholdee_id_8, withholdee_id_9, withholdee_id_10, withholdee_id_11, withholdee_id_12, withholdee_id_13], spacing=4, wrap=True),
+                                ft.Text("ผู้ถูกหักภาษี (13 หลัก)", weight=ft.FontWeight.BOLD),
+                                ft.Row([withholder_id_1, withholder_id_2, withholder_id_3, withholder_id_4, withholder_id_5, withholder_id_6, withholder_id_7, withholder_id_8, withholder_id_9, withholder_id_10, withholder_id_11, withholder_id_12, withholder_id_13], spacing=4, wrap=True),
+                                ft.Divider(),
+                                ft.Text("กล่อง 10 ช่อง (ใช้สำหรับรูปแบบตัดแบ่ง)", weight=ft.FontWeight.BOLD),
                                 ft.Row([card_number_1, card_number_2, card_number_3, card_number_4, card_number_5], spacing=10, wrap=True),
                                 ft.Row([card_number_6, card_number_7, card_number_8, card_number_9, card_number_10], spacing=10, wrap=True),
                                 ft.Row([
@@ -8835,19 +10241,19 @@ def main(page: ft.Page):
                                         "เติมเลขที่บัตร",
                                         icon=ft.icons.NUMBERS,
                                         on_click=fill_card_numbers_from_tax_id,
-                                        style=ft.ButtonStyle(bgcolor=ft.colors.BLUE_700, color=ft.colors.WHITE)
+                                        style=ft.ButtonStyle(bgcolor=ft.Colors.BLUE_700, color=ft.Colors.WHITE)
                                     )
                                     ,
                                     ft.ElevatedButton(
                                         "เติมเลขที่บัตร (ผู้มีหน้าที่หักภาษี)",
                                         icon=ft.icons.NUMBERS,
                                         on_click=fill_card_numbers_from_withholder_tax_id,
-                                        style=ft.ButtonStyle(bgcolor=ft.colors.INDIGO_700, color=ft.colors.WHITE)
+                                        style=ft.ButtonStyle(bgcolor=ft.Colors.INDIGO_700, color=ft.Colors.WHITE)
                                     )
                                 ])
                             ], spacing=10),
                             padding=10,
-                            bgcolor=ft.colors.GREY_50,
+                            bgcolor=ft.Colors.GREY_50,
                             border_radius=10
                         )
                     ]
@@ -8855,62 +10261,62 @@ def main(page: ft.Page):
                 
                 # Crystal Reports methodology explanation
                 ft.ExpansionTile(
-                    title=ft.Text("📊 Crystal Reports Methodology", weight=ft.FontWeight.BOLD, color=ft.colors.GREEN_700),
+                    title=ft.Text("📊 Crystal Reports Methodology", weight=ft.FontWeight.BOLD, color=ft.Colors.GREEN_700),
                     controls=[
                         ft.Container(
                             content=ft.Column([
-                                ft.Text("🏗️ เทคนิค Crystal Reports ที่นำมาใช้:", weight=ft.FontWeight.BOLD, color=ft.colors.BLUE_700, size=16),
+                                ft.Text("🏗️ เทคนิค Crystal Reports ที่นำมาใช้:", weight=ft.FontWeight.BOLD, color=ft.Colors.BLUE_700, size=16),
                                 ft.Divider(),
                                 
                                 ft.Container(
                                     content=ft.Column([
-                                        ft.Text("📋 Report Sections (แบ่งส่วนรายงาน):", weight=ft.FontWeight.BOLD, color=ft.colors.GREEN_700),
+                                        ft.Text("📋 Report Sections (แบ่งส่วนรายงาน):", weight=ft.FontWeight.BOLD, color=ft.Colors.GREEN_700),
                                         ft.Text("• Page Header: ส่วนหัวของหน้า (ว่าง)", size=12),
                                         ft.Text("• Report Header: ข้อมูลเอกสารอ้างอิง", size=12),
                                         ft.Text("• Detail Section: ข้อมูลหลักของฟอร์ม", size=12),
                                         ft.Text("• Report Footer: ลายเซ็นและวันที่", size=12),
                                         ft.Text("• Page Footer: หมายเหตุทางกฎหมาย", size=12),
                                     ], spacing=5),
-                                    bgcolor=ft.colors.GREEN_50,
+                                    bgcolor=ft.Colors.GREEN_50,
                                     padding=10,
                                     border_radius=5
                                 ),
                                 
                                 ft.Container(
                                     content=ft.Column([
-                                        ft.Text("🎯 Field Objects (วัตถุฟิลด์):", weight=ft.FontWeight.BOLD, color=ft.colors.BLUE_700),
+                                        ft.Text("🎯 Field Objects (วัตถุฟิลด์):", weight=ft.FontWeight.BOLD, color=ft.Colors.BLUE_700),
                                         ft.Text("• Text Objects: ตำแหน่งและการจัดรูปแบบที่แม่นยำ", size=12),
                                         ft.Text("• Font Management: การจัดการฟอนต์ไทยและอังกฤษ", size=12),
                                         ft.Text("• Alignment: Left, Right, Center alignment", size=12),
                                         ft.Text("• Can Grow Fields: ข้อความหลายบรรทัด", size=12),
                                     ], spacing=5),
-                                    bgcolor=ft.colors.BLUE_50,
+                                    bgcolor=ft.Colors.BLUE_50,
                                     padding=10,
                                     border_radius=5
                                 ),
                                 
                                 ft.Container(
                                     content=ft.Column([
-                                        ft.Text("🧮 Formula Fields (ฟิลด์สูตร):", weight=ft.FontWeight.BOLD, color=ft.colors.PURPLE_700),
+                                        ft.Text("🧮 Formula Fields (ฟิลด์สูตร):", weight=ft.FontWeight.BOLD, color=ft.Colors.PURPLE_700),
                                         ft.Text("• Calculated Totals: การคำนวณยอดรวมอัตโนมัติ", size=12),
                                         ft.Text("• Number Formatting: การจัดรูปแบบตัวเลข", size=12),
                                         ft.Text("• Conditional Logic: เงื่อนไขในการแสดงผล", size=12),
                                         ft.Text("• Data Validation: การตรวจสอบข้อมูล", size=12),
                                     ], spacing=5),
-                                    bgcolor=ft.colors.PURPLE_50,
+                                    bgcolor=ft.Colors.PURPLE_50,
                                     padding=10,
                                     border_radius=5
                                 ),
                                 
                                 ft.Container(
                                     content=ft.Column([
-                                        ft.Text("🖼️ Background Integration:", weight=ft.FontWeight.BOLD, color=ft.colors.ORANGE_700),
+                                        ft.Text("🖼️ Background Integration:", weight=ft.FontWeight.BOLD, color=ft.Colors.ORANGE_700),
                                         ft.Text("• PDF to Image Conversion: แปลง PDF เป็นภาพคุณภาพสูง", size=12),
                                         ft.Text("• High DPI Rendering: เรนเดอร์ 300 DPI สำหรับการพิมพ์", size=12),
                                         ft.Text("• Overlay Technique: วางข้อมูลทับภาพพื้นหลัง", size=12),
                                         ft.Text("• Professional Output: ผลลัพธ์ระดับมืออาชีพ", size=12),
                                     ], spacing=5),
-                                    bgcolor=ft.colors.ORANGE_50,
+                                    bgcolor=ft.Colors.ORANGE_50,
                                     padding=10,
                                     border_radius=5
                                 ),
@@ -8918,15 +10324,15 @@ def main(page: ft.Page):
                                 ft.Divider(),
                                 ft.Container(
                                     content=ft.Column([
-                                        ft.Text("⚙️ Technical Implementation:", weight=ft.FontWeight.BOLD, color=ft.colors.TEAL_700),
+                                        ft.Text("⚙️ Technical Implementation:", weight=ft.FontWeight.BOLD, color=ft.Colors.TEAL_700),
                                         ft.Text("pip install reportlab PyMuPDF", 
-                                               style=ft.TextStyle(bgcolor=ft.colors.BLACK, color=ft.colors.WHITE, size=12)),
+                                               style=ft.TextStyle(bgcolor=ft.Colors.BLACK, color=ft.Colors.WHITE, size=12)),
                                         ft.Text("• ReportLab Canvas API สำหรับการวาด", size=12),
                                         ft.Text("• PyMuPDF สำหรับแปลง PDF เป็นภาพ", size=12),
                                         ft.Text("• Section-based Rendering Architecture", size=12),
                                         ft.Text("• Professional Typography Support", size=12),
                                     ], spacing=5),
-                                    bgcolor=ft.colors.TEAL_50,
+                                    bgcolor=ft.Colors.TEAL_50,
                                     padding=10,
                                     border_radius=5
                                 ),
@@ -8938,27 +10344,41 @@ def main(page: ft.Page):
                 
                 # Coordinate adjustment panel
                 ft.ExpansionTile(
-                    title=ft.Text("⚙️ ปรับตำแหน่งฟิลด์ PDF", weight=ft.FontWeight.BOLD, color=ft.colors.BLUE_700),
-                    subtitle=ft.Text("กำหนดพิกัด X, Y และขนาดตัวอักษรสำหรับแต่ละฟิลด์", size=11, color=ft.colors.GREY_600),
+                    title=ft.Text("⚙️ ปรับตำแหน่งฟิลด์ PDF", weight=ft.FontWeight.BOLD, color=ft.Colors.BLUE_700),
+                    subtitle=ft.Text("กำหนดพิกัด X, Y และขนาดตัวอักษรสำหรับแต่ละฟิลด์", size=11, color=ft.Colors.GREY_600),
                     initially_expanded=False,
                     controls=[
                         ft.Container(
                             content=ft.Column([
                 ft.Row([
                                     ft.ElevatedButton("🔍 ทดสอบทุกฟิลด์", on_click=preview_all_coordinates,
-                                                    style=ft.ButtonStyle(bgcolor=ft.colors.PURPLE_700, color=ft.colors.WHITE)),
+                                                    style=ft.ButtonStyle(bgcolor=ft.Colors.PURPLE_700, color=ft.Colors.WHITE)),
                                     ft.ElevatedButton("📸 บันทึกเป็น PNG", on_click=save_coordinate_test_png,
-                                                    style=ft.ButtonStyle(bgcolor=ft.colors.RED_700, color=ft.colors.WHITE)),
+                                                    style=ft.ButtonStyle(bgcolor=ft.Colors.RED_700, color=ft.Colors.WHITE)),
                                     ft.ElevatedButton("💾 บันทึกการตั้งค่า", on_click=save_coordinates_config,
-                                                    style=ft.ButtonStyle(bgcolor=ft.colors.TEAL_700, color=ft.colors.WHITE)),
+                                                    style=ft.ButtonStyle(bgcolor=ft.Colors.TEAL_700, color=ft.Colors.WHITE)),
                                     ft.ElevatedButton("📂 โหลดการตั้งค่า", on_click=load_coordinates_config,
-                                                    style=ft.ButtonStyle(bgcolor=ft.colors.ORANGE_700, color=ft.colors.WHITE)),
+                                                    style=ft.ButtonStyle(bgcolor=ft.Colors.ORANGE_700, color=ft.Colors.WHITE)),
                                 ], spacing=10),
                 # Quick-select buttons row: ผู้จ่ายเงิน + เลขที่บัตร 1–5
                 ft.Row([
                     ft.Text("เมนูเลือกฟิลด์อย่างรวดเร็ว:", weight=ft.FontWeight.BOLD),
                     ft.OutlinedButton("ผู้จ่ายเงิน", on_click=lambda e: (test_single_field("signatory_name"))),
                     ft.OutlinedButton("วันที่ชำระค่าธรรมเนียม", on_click=lambda e: (test_single_field("fee_payment_date"))),
+                    ft.OutlinedButton("ผู้ถูกหัก 13 หลัก", on_click=lambda e: [
+                        test_single_field("withholdee_id_1"), test_single_field("withholdee_id_2"), test_single_field("withholdee_id_3"),
+                        test_single_field("withholdee_id_4"), test_single_field("withholdee_id_5"), test_single_field("withholdee_id_6"),
+                        test_single_field("withholdee_id_7"), test_single_field("withholdee_id_8"), test_single_field("withholdee_id_9"),
+                        test_single_field("withholdee_id_10"), test_single_field("withholdee_id_11"), test_single_field("withholdee_id_12"),
+                        test_single_field("withholdee_id_13")
+                    ]),
+                    ft.OutlinedButton("ผู้หัก 13 หลัก", on_click=lambda e: [
+                        test_single_field("withholder_id_1"), test_single_field("withholder_id_2"), test_single_field("withholder_id_3"),
+                        test_single_field("withholder_id_4"), test_single_field("withholder_id_5"), test_single_field("withholder_id_6"),
+                        test_single_field("withholder_id_7"), test_single_field("withholder_id_8"), test_single_field("withholder_id_9"),
+                        test_single_field("withholder_id_10"), test_single_field("withholder_id_11"), test_single_field("withholder_id_12"),
+                        test_single_field("withholder_id_13")
+                    ]),
                     ft.OutlinedButton("เลขที่บัตร 1", on_click=lambda e: (test_single_field("card_number_1"))),
                     ft.OutlinedButton("เลขที่บัตร 2", on_click=lambda e: (test_single_field("card_number_2"))),
                     ft.OutlinedButton("เลขที่บัตร 3", on_click=lambda e: (test_single_field("card_number_3"))),
@@ -8978,7 +10398,7 @@ def main(page: ft.Page):
                                             scroll=ft.ScrollMode.AUTO,
                                             height=400
                                         ),
-                                        border=ft.border.all(1, ft.colors.GREY_300),
+                                        border=ft.border.all(1, ft.Colors.GREY_300),
                                         border_radius=5,
                                         padding=10,
                                         expand=True
@@ -8987,7 +10407,7 @@ def main(page: ft.Page):
                                     ft.Container(
                                         content=ft.Column([
                                             ft.Text("ตัวอย่างพิกัด", size=12, weight=ft.FontWeight.BOLD, 
-                                                   color=ft.colors.BLUE_700, text_align=ft.TextAlign.CENTER),
+                                                   color=ft.Colors.BLUE_700, text_align=ft.TextAlign.CENTER),
                                             coordinate_test_viewer
                                         ], spacing=5),
                                         padding=10
@@ -9003,18 +10423,165 @@ def main(page: ft.Page):
             padding=20
         )
 
+        # Thread 2: Auto-fill withholdee data from temp file or database
+        def delayed_withholdee_auto_fill():
+            import time
+            print("⏰ delayed_withholdee_auto_fill started - waiting 1.5 seconds...")
+            time.sleep(1.5)  # Wait for UI to be ready
+            
+            try:
+                print("🔄 Checking for withholdee data to auto-fill...")
+                
+                # First, try to get data from temp file (from dashboard button)
+                temp_file_path = os.path.join(os.getcwd(), "temp_dashboard_data.json")
+                withholdee_filled = False
+                
+                if os.path.exists(temp_file_path):
+                    try:
+                        with open(temp_file_path, 'r', encoding='utf-8') as f:
+                            dashboard_data = json.load(f)
+                        print(f"🔍 Found temp file data for withholdee: {dashboard_data}")
+                        
+                        # Look for transfer record data to fill withholdee fields
+                        if dashboard_data.get('transfer_record'):
+                            record = dashboard_data['transfer_record']
+                            name = record.get('name', '')
+                            surname = record.get('surname', '')
+                            full_name = f"{name} {surname}".strip()
+                            
+                            if full_name:
+                                withholdee_name.value = full_name
+                                withholdee_address.value = record.get('address', '')
+                                withholdee_tax_id.value = record.get('id_card', '')
+                                
+                                # Fill income data
+                                transfer_amount = record.get('transfer_amount', 0)
+                                fee = record.get('fee', 0)
+                                income_1_amount.value = f"{float(transfer_amount or 0):.2f}"
+                                income_1_tax.value = "0.00"
+                                income_2_amount.value = "0.00"
+                                income_2_tax.value = f"{float(fee or 0):.2f}"
+                                
+                                # Update totals
+                                total_income_display.value = f"{float(transfer_amount or 0):,.2f}"
+                                total_tax_display.value = f"{float(fee or 0):,.2f}"
+                                
+                                status_text.value = f"✅ โหลดข้อมูลผู้ถูกหักภาษีจาก Dashboard: {full_name}"
+                                status_text.color = ft.Colors.GREEN_700
+                                page.update()
+                                withholdee_filled = True
+                                print(f"✅ Auto-filled withholdee data from temp file: {full_name}")
+                    except Exception as file_ex:
+                        print(f"❌ Failed to load temp file for withholdee: {file_ex}")
+                
+                # If no temp data, try using selected_transfer_id_for_pdf
+                if not withholdee_filled:
+                    print("🔄 No temp file data, trying auto_fill_from_selected_dashboard...")
+                    auto_fill_from_selected_dashboard()
+                    print("✅ auto_fill_from_selected_dashboard completed")
+                
+            except Exception as ex:
+                print(f"❌ delayed_withholdee_auto_fill error: {ex}")
+
         # Initialize coordinate settings and auto-fill from dashboard selection (if any)
         try:
             initialize_coordinate_settings_once()
-            auto_fill_from_selected_dashboard()
+            
+            # AUTO-CLICK ปุ่ม "ดึงข้อมูลที่เลือก" ง่ายๆ
+            import threading
+            def auto_click_button():
+                import time
+                time.sleep(0.8)  # รอให้ UI พร้อม
+                print("🔄 Auto-clicking 'ดึงข้อมูลที่เลือก' button...")
+                try:
+                    _f = globals().get('auto_fill_from_selected_dashboard')
+                    if callable(_f):
+                        _f()  # เรียกฟังก์ชันเดียวกับปุ่ม
+                    print("✅ Auto-click completed!")
+                except Exception as e:
+                    print(f"❌ Auto-click error: {e}")
+            
+            # เริ่ม auto-click
+            threading.Thread(target=auto_click_button, daemon=True).start()
+            print("✅ Auto-click thread started")
+            
         except Exception as _init_err:
             print(f"Coordinate init hook error: {_init_err}")
 
+        # AUTO-CLICK: กดปุ่ม "ดึงข้อมูลที่เลือก" อัตโนมัติทุกครั้งที่เปิด tab
+        def force_auto_fill_every_time():
+            import time
+            time.sleep(0.3)  # รอให้ UI พร้อม (เร็วขึ้น)
+            try:
+                print("🚀 FORCE AUTO-FILL: กดปุ่ม 'ดึงข้อมูลที่เลือก' อัตโนมัติ...")
+                _f = globals().get('auto_fill_from_selected_dashboard')
+                if callable(_f):
+                    _f()  # กดปุ่มให้อัตโนมัติ
+                print("✅ Auto-fill completed - user ไม่ต้องกดปุ่มเอง!")
+            except Exception as e:
+                print(f"❌ Auto-fill error: {e}")
+                # ถ้าไม่สำเร็จ ลองอีกครั้ง
+                try:
+                    time.sleep(0.3)
+                    print("🔄 Retrying auto-fill...")
+                    _f = globals().get('auto_fill_from_selected_dashboard')
+                    if callable(_f):
+                        _f()
+                    print("✅ Retry successful!")
+                except Exception as retry_e:
+                    print(f"❌ Retry failed: {retry_e}")
+        
+        # เริ่ม auto-fill ทันทีทุกครั้งที่เปิด tab
+        import threading
+        threading.Thread(target=force_auto_fill_every_time, daemon=True).start()
+        print("🚀 FORCE AUTO-FILL STARTED - ปุ่มจะถูกกดอัตโนมัติทุกครั้ง!")
+        
+        # เพิ่มการกดปุ่มอีกครั้งหลังจาก UI พร้อมสมบูรณ์
+        def delayed_force_click():
+            import time
+            time.sleep(1.0)  # รอให้ UI พร้อมสมบูรณ์
+            try:
+                print("🔄 DELAYED FORCE CLICK: กดปุ่ม 'ดึงข้อมูลที่เลือก' อีกครั้ง...")
+                _f = globals().get('auto_fill_from_selected_dashboard')
+                if callable(_f):
+                    _f()
+                print("✅ Delayed force click completed!")
+            except Exception as e:
+                print(f"❌ Delayed force click error: {e}")
+        
+        # เริ่ม delayed force click
+        threading.Thread(target=delayed_force_click, daemon=True).start()
+        print("🚀 DELAYED FORCE CLICK STARTED!")
+
+        # Ensure 13-digit boxes are auto-populated without button after UI is ready
+        def delayed_fill_cards():
+            try:
+                import time
+                time.sleep(0.6)
+                try:
+                    fill_card_numbers_from_withholder_tax_id(None)
+                except Exception:
+                    pass
+                try:
+                    fill_card_numbers_from_tax_id(None)
+                except Exception:
+                    pass
+                try:
+                    page.update()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        try:
+            threading.Thread(target=delayed_fill_cards, daemon=True).start()
+        except Exception:
+            pass
+        
         return crystal_tab
     
     # Create navigation rail (add Import/Backup)
     nav_rail = ft.NavigationRail(
-        selected_index=2,
+        selected_index=0,
         label_type=ft.NavigationRailLabelType.ALL,
         min_width=100,
         min_extended_width=200,
@@ -9024,6 +10591,16 @@ def main(page: ft.Page):
                 icon=ft.Icons.DASHBOARD_OUTLINED,
                 selected_icon=ft.Icons.DASHBOARD,
                 label="แดชบอร์ด",
+            ),
+            ft.NavigationRailDestination(
+                icon=ft.Icons.ANALYTICS_OUTLINED,
+                selected_icon=ft.Icons.ANALYTICS,
+                label="ระบบพิกัด form PDF",
+            ),
+            ft.NavigationRailDestination(
+                icon=ft.Icons.SETTINGS_OUTLINED,
+                selected_icon=ft.Icons.SETTINGS,
+                label="ระบบตั้งค่าหัวกระดาษ",
             ),
             ft.NavigationRailDestination(
                 icon=ft.Icons.EDIT_OUTLINED,
@@ -9051,19 +10628,9 @@ def main(page: ft.Page):
                 label="ใช้ฟอร์มราชการ",
             ),
             ft.NavigationRailDestination(
-                icon=ft.Icons.ANALYTICS_OUTLINED,
-                selected_icon=ft.Icons.ANALYTICS,
-                label="form crystal report",
-            ),
-            ft.NavigationRailDestination(
                 icon=ft.Icons.FILE_UPLOAD,
                 selected_icon=ft.Icons.FILE_UPLOAD,
                 label="นำเข้าจาก Excel",
-            ),
-            ft.NavigationRailDestination(
-                icon=ft.Icons.FILE_UPLOAD,
-                selected_icon=ft.Icons.FILE_UPLOAD,
-                label="นำเข้าผู้หักภาษีจาก excel",
             ),
             ft.NavigationRailDestination(
                 icon=ft.Icons.BACKUP,
@@ -9076,32 +10643,70 @@ def main(page: ft.Page):
     
     # Content area
     content_area = ft.Container(
-        content=create_all_data_tab(),
+        content=create_dashboard_tab(),
         expand=True
     )
     
     def handle_nav_change(selected_index):
-        if selected_index == 0:
-            content_area.content = create_dashboard_tab()
-        elif selected_index == 1:
-            content_area.content = create_data_management_tab()
-        elif selected_index == 2:
-            content_area.content = create_all_data_tab()
-        elif selected_index == 3:
-            content_area.content = create_tax_form_tab()
-        elif selected_index == 4:
-            content_area.content = create_tax_certificate_tab()
-        elif selected_index == 5:
-            content_area.content = create_official_tax_form_tab()
-        elif selected_index == 6:
-            content_area.content = create_crystal_report_tab()
-        elif selected_index == 7:
-            content_area.content = create_import_excel_tab()
-        elif selected_index == 8:
-            content_area.content = create_import_withholder_excel_tab()
-        elif selected_index == 9:
-            content_area.content = create_backup_tab()
-        page.update()
+        print(f"🔄 handle_nav_change called with selected_index: {selected_index}")
+        try:
+            if selected_index == 0:
+                print("📱 Switching to Dashboard tab")
+                content_area.content = create_dashboard_tab()
+            elif selected_index == 1:
+                print("📱 Switching to Crystal Report tab (ระบบพิกัด form PDF)")
+                content_area.content = create_crystal_report_tab()
+                
+                # FORCE AUTO-FILL ทันทีที่เปลี่ยน tab
+                def force_auto_fill_on_tab_switch():
+                    import time
+                    time.sleep(0.8)  # รอให้ UI พร้อม
+                    try:
+                        print("🚀 TAB SWITCH AUTO-FILL: กดปุ่ม 'ดึงข้อมูลที่เลือก' อัตโนมัติ...")
+                        # เรียกฟังก์ชันเดียวกับปุ่ม "ดึงข้อมูลที่เลือก"
+                        _f = globals().get('auto_fill_from_selected_dashboard')
+                        if callable(_f):
+                            _f()
+                            print("✅ Tab switch auto-fill completed!")
+                        else:
+                            print("⚠️ auto_fill_from_selected_dashboard not found in globals")
+                    except Exception as e:
+                        print(f"❌ Tab switch auto-fill error: {e}")
+                
+                # เริ่ม auto-fill ทันทีที่เปลี่ยน tab
+                import threading
+                threading.Thread(target=force_auto_fill_on_tab_switch, daemon=True).start()
+                print("🚀 TAB SWITCH AUTO-FILL STARTED!")
+            elif selected_index == 2:
+                print("📱 Switching to Import Withholder Excel tab")
+                content_area.content = create_import_withholder_excel_tab()
+            elif selected_index == 3:
+                print("📱 Switching to Data Management tab")
+                content_area.content = create_data_management_tab()
+            elif selected_index == 4:
+                print("📱 Switching to All Data tab")
+                content_area.content = create_all_data_tab()
+            elif selected_index == 5:
+                print("📱 Switching to Tax Form tab")
+                content_area.content = create_tax_form_tab()
+            elif selected_index == 6:
+                print("📱 Switching to Tax Certificate tab")
+                content_area.content = create_tax_certificate_tab()
+            elif selected_index == 7:
+                print("📱 Switching to Official Tax Form tab")
+                content_area.content = create_official_tax_form_tab()
+            elif selected_index == 8:
+                print("📱 Switching to Import Excel tab")
+                content_area.content = create_import_excel_tab()
+            elif selected_index == 9:
+                print("📱 Switching to Backup tab")
+                content_area.content = create_backup_tab()
+            print(f"✅ Tab switch completed, updating page...")
+            page.update()
+        except Exception as ex:
+            print(f"❌ Error in handle_nav_change: {ex}")
+            import traceback
+            traceback.print_exc()
     
     # Main layout with navigation rail and scrollbar
     page.add(
