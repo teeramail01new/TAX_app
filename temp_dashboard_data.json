@@ -1,0 +1,18 @@
+{
+  "withholder_name": "บุลากร ลนทม",
+  "withholder_address": "323 หมู4 ต.อางทอง อ.เชียงคํา จ.พะเยา",
+  "withholder_tax_id": "1560300246831",
+  "transfer_record": {
+    "id": 4,
+    "name": "บุลากร",
+    "surname": "ลนทม",
+    "transfer_amount": 14000.0,
+    "transfer_date": "05/07/2025",
+    "id_card": "1560300246831",
+    "address": "323 หมู4 ต.อางทอง อ.เชียงคํา จ.พะเยา",
+    "percent": 3.0,
+    "total_amount": 14432.99,
+    "fee": 432.99,
+    "remark": "14000.00"
+  }
+}
